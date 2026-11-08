@@ -254,6 +254,7 @@ struct Cache {
     // Small metadata retained after decoded-array eviction, at most one 32-byte
     // digest (plus key/tree overhead) per indexed chunk, outside array budget.
     render_hashes: BTreeMap<(i32, i32), blake3::Hash>,
+    skipped: HashSet<(i32, i32)>,
 }
 
 impl Cache {
@@ -281,11 +282,39 @@ pub struct World {
     regions: BTreeMap<String, Region>,
     cache: Mutex<Cache>,
     cache_bytes: usize,
+    skip_corrupt_chunks: bool,
+    skipped_allocations: usize,
 }
+
+#[derive(Debug)]
+struct CorruptChunk(String);
+impl std::fmt::Display for CorruptChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for CorruptChunk {}
+
+#[derive(Debug)]
+struct UnsupportedVersion;
+impl std::fmt::Display for UnsupportedVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("chunk DataVersion exceeds Minecraft Java 1.12.2 (1343)")
+    }
+}
+impl std::error::Error for UnsupportedVersion {}
 
 impl World {
     /// Header metadata is a snapshot. Do not modify region files during a render.
     pub fn open(region_directory: &Path, cache_bytes: usize) -> Result<Self> {
+        Self::open_with_options(region_directory, cache_bytes, false)
+    }
+
+    pub fn open_with_options(
+        region_directory: &Path,
+        cache_bytes: usize,
+        skip_corrupt_chunks: bool,
+    ) -> Result<Self> {
         let mut locations: BTreeMap<(i32, i32), Location> = BTreeMap::new();
         let mut regions = BTreeMap::new();
         for entry in std::fs::read_dir(region_directory)
@@ -306,6 +335,12 @@ impl World {
                 positions: Vec::new(),
             };
             let mut header = [0; 8192];
+            if skip_corrupt_chunks && size < header.len() as u64 {
+                region.check_file(&file)?;
+                tracing::warn!(region = %entry.path().display(), "Skipping corrupt region: truncated header; source file is unchanged");
+                regions.insert(name.to_owned(), region);
+                continue;
+            }
             file.read_exact_at(&mut header, 0)
                 .with_context(|| format!("reading region header {}", entry.path().display()))?;
             let mut occupied = HashMap::new();
@@ -352,12 +387,33 @@ impl World {
             region.check_file(&file)?;
             regions.insert(name.to_owned(), region);
         }
+        let mut rejected = BTreeMap::<String, usize>::new();
+        if skip_corrupt_chunks {
+            locations.retain(|_, location| {
+                if location.invalid.is_some() {
+                    *rejected.entry(location.region.clone()).or_default() += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+            for (name, count) in &rejected {
+                let region = regions.get_mut(name).unwrap();
+                region
+                    .positions
+                    .retain(|position| locations.contains_key(position));
+                tracing::warn!(region = %region.path.display(), skipped_chunks = count,
+                    "Skipping corrupt chunk sector allocations; source file is unchanged");
+            }
+        }
         let world = Self {
             region_directory: region_directory.to_owned(),
             locations,
             regions,
             cache: Mutex::new(Cache::default()),
             cache_bytes,
+            skip_corrupt_chunks,
+            skipped_allocations: rejected.values().sum(),
         };
         world.check_consistent()?;
         Ok(world)
@@ -395,6 +451,22 @@ impl World {
 
     pub fn chunk_positions(&self) -> Vec<(i32, i32)> {
         self.locations.keys().copied().collect()
+    }
+
+    pub fn skipped_chunks(&self) -> usize {
+        self.skipped_allocations + self.cache.lock().unwrap().skipped.len()
+    }
+
+    fn skip_corruption(&self, x: i32, z: i32, error: &anyhow::Error) -> bool {
+        if self.skip_corrupt_chunks && error.is::<CorruptChunk>() {
+            if self.cache.lock().unwrap().skipped.insert((x, z)) {
+                tracing::warn!(chunk_x = x, chunk_z = z, region = %self.regions[&self.locations[&(x,z)].region].path.display(),
+                    "Skipping corrupt chunk; source file is unchanged: {error:#}");
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Successfully decoded render-input hashes, including evicted chunks.
@@ -444,6 +516,9 @@ impl World {
             return Ok(None);
         };
         let mut cache = self.cache.lock().unwrap();
+        if cache.skipped.contains(&(x, z)) {
+            return Ok(None);
+        }
         if let Some(hit) = cache.hit((x, z)) {
             return Ok(Some(hit));
         }
@@ -460,9 +535,19 @@ impl World {
                 region.check_file(&file)?;
                 payload
             };
-            decode_chunk(compression, &payload, x, z)
-                .with_context(|| format!("decoding chunk {x},{z}"))
+            decode_chunk(compression, &payload, x, z).map_err(|error| {
+                if error.is::<UnsupportedVersion>() {
+                    error
+                } else {
+                    anyhow::Error::new(CorruptChunk(format!("decoding chunk {x},{z}: {error:#}")))
+                }
+            })
         })();
+        if let Err(error) = &decoded
+            && self.skip_corruption(x, z, error)
+        {
+            return Ok(None);
+        }
         let decoded = decoded.map(|chunk| {
             let hash = chunk.render_hash();
             (chunk, hash)
@@ -559,8 +644,15 @@ impl World {
                 region.check_file(&file)?;
                 let mut chunks = BTreeMap::new();
                 for &(x, z) in &region.positions {
-                    let (compression, payload) = read_payload(&self.locations[&(x, z)], &file)
-                        .with_context(|| format!("hashing chunk {x},{z} in {name}"))?;
+                    let (compression, payload) = match read_payload(&self.locations[&(x, z)], &file)
+                    {
+                        Ok(payload) => payload,
+                        Err(error) if self.skip_corruption(x, z, &error) => continue,
+                        Err(error) => {
+                            return Err(error)
+                                .with_context(|| format!("hashing chunk {x},{z} in {name}"));
+                        }
+                    };
                     chunks.insert(format!("{x},{z}"), payload_hash(compression, &payload));
                 }
                 region.check_file(&file)?;
@@ -588,14 +680,14 @@ fn payload_hash(compression: u8, payload: &[u8]) -> String {
 
 fn read_payload(location: &Location, file: &File) -> Result<(u8, Vec<u8>)> {
     if let Some(error) = &location.invalid {
-        bail!("{error}");
+        bail!(CorruptChunk(error.clone()));
     }
     let mut header = [0; 5];
     file.read_exact_at(&mut header, location.offset)?;
     let length = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
     ensure!(
         length > 1 && length + 4 <= location.sectors as usize * SECTOR as usize,
-        "invalid chunk payload length {length}"
+        CorruptChunk(format!("invalid chunk payload length {length}"))
     );
     ensure!(
         matches!(header[4], 1 | 2),
@@ -621,7 +713,7 @@ fn decode_chunk(compression: u8, payload: &[u8], x: i32, z: i32) -> Result<Chunk
         fastnbt::from_bytes_with_opts(&nbt, fastnbt::DeOpts::new().max_seq_len(MAX_NBT))?;
     ensure!(
         root.data_version.is_none_or(|v| v <= 1343),
-        "chunk DataVersion exceeds Minecraft Java 1.12.2 (1343)"
+        UnsupportedVersion
     );
     ensure!(
         root.level.x == x && root.level.z == z,
@@ -843,6 +935,91 @@ mod tests {
             assert_eq!(hashes["-1,-1"], payload_hash(compression, &payload));
             assert_eq!(hashes, world.fingerprints().unwrap());
         }
+    }
+
+    #[test]
+    fn tolerant_allocations_skip_only_bad_chunks_without_changing_sources() {
+        let (dir, _) = fixture(1343, 2);
+        let path = dir.path().join("r.-1.-1.mca");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[..4].copy_from_slice(&[0, 0, 255, 1]);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(World::open(dir.path(), 0).unwrap().fingerprints().is_err());
+        let world = World::open_with_options(dir.path(), 1024 * 1024, true).unwrap();
+        assert_eq!(world.chunk_positions(), vec![(-1, -1)]);
+        assert!(world.get_chunk(-1, -1).unwrap().is_some());
+        assert!(world.get_chunk(-32, -32).unwrap().is_none());
+        assert_eq!(world.fingerprints().unwrap().len(), 1);
+        assert_eq!(world.skipped_chunks(), 1);
+        world.check_consistent().unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn tolerant_overlap_omits_both_owners_not_just_the_last() {
+        let (dir, _) = fixture(1343, 2);
+        let path = dir.path().join("r.-1.-1.mca");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[..4].copy_from_slice(&[0, 0, 2, 1]);
+        std::fs::write(&path, &bytes).unwrap();
+        let world = World::open_with_options(dir.path(), 0, true).unwrap();
+        assert!(world.chunk_positions().is_empty());
+        assert!(world.fingerprints().unwrap().is_empty());
+        assert_eq!(world.skipped_chunks(), 2);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn tolerant_payload_and_nbt_errors_are_cached_as_missing_with_no_writes() {
+        for invalid_length in [false, true] {
+            let (dir, _) = fixture(1343, 2);
+            let path = dir.path().join("r.-1.-1.mca");
+            let mut bytes = std::fs::read(&path).unwrap();
+            if invalid_length {
+                bytes[8192..8196].copy_from_slice(&u32::MAX.to_be_bytes());
+            } else {
+                bytes[8197..8201].fill(0xff);
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            let strict = World::open(dir.path(), 0).unwrap();
+            assert!(strict.get_chunk(-1, -1).is_err());
+            assert!(strict.check_consistent().is_err());
+            let world = World::open_with_options(dir.path(), 0, true).unwrap();
+            world.fingerprints().unwrap();
+            for _ in 0..2 {
+                assert!(world.get_chunk(-1, -1).unwrap().is_none());
+            }
+            assert_eq!(world.skipped_chunks(), 1);
+            world.check_consistent().unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn tolerant_truncated_header_still_detects_source_changes() {
+        let (dir, _) = fixture(1343, 2);
+        let path = dir.path().join("r.-1.-1.mca");
+        std::fs::write(&path, [0; 128]).unwrap();
+        assert!(World::open(dir.path(), 0).is_err());
+        let world = World::open_with_options(dir.path(), 0, true).unwrap();
+        assert!(world.fingerprints().unwrap().is_empty());
+        std::fs::write(&path, [0; 256]).unwrap();
+        assert!(world.check_consistent().is_err());
+    }
+
+    #[test]
+    fn tolerant_mode_never_hides_missing_files_or_unsupported_versions() {
+        let (dir, _) = fixture(1344, 2);
+        let world = World::open_with_options(dir.path(), 0, true).unwrap();
+        assert!(world.get_chunk(-1, -1).is_err());
+        assert_eq!(world.skipped_chunks(), 0);
+        assert!(world.check_consistent().is_err());
+        let (dir, _) = fixture(1343, 2);
+        let world = World::open_with_options(dir.path(), 0, true).unwrap();
+        std::fs::remove_file(dir.path().join("r.-1.-1.mca")).unwrap();
+        assert!(world.get_chunk(-1, -1).is_err());
+        assert_eq!(world.skipped_chunks(), 0);
+        assert!(world.check_consistent().is_err());
     }
 
     #[test]

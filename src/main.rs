@@ -128,11 +128,12 @@ fn run() -> Result<()> {
                 );
             } else {
                 println!(
-                    "Finished in {:.2}s · {} changed chunks · {} rendered tiles + {} zoom tiles · peak RSS {} MiB{}",
+                    "Finished in {:.2}s · {} changed chunks · {} rendered tiles + {} zoom tiles · {} corrupt chunks skipped · peak RSS {} MiB{}",
                     start.elapsed().as_secs_f64(),
                     stats.chunks_changed,
                     stats.base_tiles_rendered,
                     stats.parent_tiles_rendered,
+                    stats.skipped_corrupt_chunks,
                     progress::peak_mib(),
                     if stats.unchanged {
                         " · no output rewritten"

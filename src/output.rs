@@ -78,6 +78,7 @@ pub struct RenderStats {
     pub encoded_tiles: u64,
     pub duplicate_encodes_avoided: u64,
     pub metadata_only_chunks: usize,
+    pub skipped_corrupt_chunks: usize,
 }
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -305,6 +306,7 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
     // Resource/output-location changes must not force an expensive visual rebuild.
     signature.update(&config.tile_size.to_le_bytes());
     signature.update(&serde_json::to_vec(&config.encoding)?);
+    signature.update(&[u8::from(config.skip_corrupt_chunks)]);
     signature.update(assets.fingerprint().as_bytes());
     signature.update(include_bytes!("render.rs"));
     signature.update(include_bytes!("assets.rs"));
@@ -375,7 +377,7 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
             world.clone()
         } else {
             let world = Arc::new(
-                World::open(&directory, per_world)
+                World::open_with_options(&directory, per_world, config.skip_corrupt_chunks)
                     .with_context(|| format!("opening world {id}"))?,
             );
             opened.insert(directory.clone(), world.clone());
@@ -436,8 +438,15 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
                 } else {
                     let chunk = worlds[id]
                         .get_chunk(pos.0, pos.1)
-                        .with_context(|| format!("unreadable chunk {id} {},{}", pos.0, pos.1))?
-                        .context("indexed chunk disappeared")?;
+                        .with_context(|| format!("unreadable chunk {id} {},{}", pos.0, pos.1))?;
+                    let Some(chunk) = chunk else {
+                        if !config.skip_corrupt_chunks {
+                            bail!("indexed chunk disappeared");
+                        }
+                        render_hashes.remove(key);
+                        positions.insert(pos);
+                        continue;
+                    };
                     let hash = chunk.render_fingerprint();
                     if render_hashes.get(key) != Some(&hash) {
                         positions.insert(pos);
@@ -468,6 +477,7 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
             atomic_write(&state_path, &bytes)?;
         }
         install_viewer(&config.output)?;
+        stats.skipped_corrupt_chunks = opened.values().map(|world| world.skipped_chunks()).sum();
         stats.unchanged = true;
         tracing::info!("World content and settings unchanged; no output rewritten");
         return Ok(stats);
@@ -661,6 +671,7 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
             .or_default()
             .extend(world.decoded_render_fingerprints());
     }
+    stats.skipped_corrupt_chunks = opened.values().map(|world| world.skipped_chunks()).sum();
     stats.encoded_tiles = encoder.encoded.load(Ordering::Relaxed);
     stats.duplicate_encodes_avoided = encoder.reused.load(Ordering::Relaxed);
     if let Some(base) = compact_base {

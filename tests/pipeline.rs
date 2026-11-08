@@ -41,6 +41,7 @@ impl Fixture {
                 .unwrap();
         }
         let config = Config {
+            skip_corrupt_chunks: false,
             encoding: voxelatlas::config::Encoding::Fast,
             output: root.join("output"),
             textures,
@@ -427,6 +428,31 @@ fn corrupt_chunk_does_not_replace_published_generation_or_state() {
         state
     );
     assert_eq!(decoded(&fixture.config.output), old_tiles);
+}
+
+#[test]
+fn optional_corruption_skipping_matches_full_render_and_never_edits_input() {
+    let mut fixture = Fixture::new();
+    fixture.config.skip_corrupt_chunks = true;
+    fixture.world(&[(0, 0, 1), (1, 0, 3)]);
+    output::render(&fixture.config, false).unwrap();
+    let path = fixture.config.worlds["world"].path.join("region/r.0.0.mca");
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[8197..8201].fill(0xff);
+    output::atomic_write(&path, &bytes).unwrap();
+    let result = output::render(&fixture.config, false).unwrap();
+    assert_eq!(result.skipped_corrupt_chunks, 1);
+    assert!(!result.unchanged);
+    assert!(!decoded(&fixture.config.output).is_empty());
+    let forced = fixture.full_config("forced-corruption");
+    assert_eq!(
+        output::render(&forced, false)
+            .unwrap()
+            .skipped_corrupt_chunks,
+        1
+    );
+    assert_eq!(decoded(&fixture.config.output), decoded(&forced.output));
+    assert_eq!(fs::read(path).unwrap(), bytes);
 }
 
 #[test]

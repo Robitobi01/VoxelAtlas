@@ -18,6 +18,9 @@ pub struct Config {
     pub tile_size: u32,
     #[serde(default)]
     pub encoding: Encoding,
+    /// Skip damaged chunk data with warnings; source changes and I/O errors remain fatal.
+    #[serde(default)]
+    pub skip_corrupt_chunks: bool,
     pub worlds: BTreeMap<String, WorldConfig>,
     pub maps: Vec<MapConfig>,
 }

@@ -20,6 +20,8 @@ Non-Nix builds: Rust 1.89+ and a C toolchain, then `cargo build --release`.
 
 Encoding: `fast` (default, exact), `compact` (exact, more CPU), or `indexed`
 (smaller, 256-color quantization; changes colors and potentially alpha).
+`skip_corrupt_chunks = true` warns and omits damaged chunks without editing worlds;
+strict mode is the default. Changing inputs and I/O errors still stop publication.
 Old tiles are retained until `voxelatlas gc --config render.toml`.
 
 ## NixOS

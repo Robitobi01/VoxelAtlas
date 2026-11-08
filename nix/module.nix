@@ -94,6 +94,7 @@ in {
           cache_mib = mkOption { type = types.ints.between 16 65536; default = 128; description = "Combined decoded-chunk cache budget in MiB (not total RSS). Increase after measuring if speed matters more than RAM."; };
           tile_size = mkOption { type = types.enum [ 256 512 ]; default = 512; description = "Tile width and height in pixels."; };
           encoding = mkOption { type = types.enum [ "fast" "compact" "indexed" ]; default = "fast"; description = "fast and compact keep every rendered pixel: fast prioritizes generation time, compact spends more encoding CPU on isometric base tiles to reduce storage. indexed additionally reduces each tile to a 256-colour adapted palette, roughly halving isometric storage for a small visible colour change, and is the same kind of reduction Mapcrafter's png_indexed applies."; };
+          skip_corrupt_chunks = mkOption { type = types.bool; default = false; description = "Warn and omit corrupt chunks without modifying input files. Source changes, I/O failures and unsupported Minecraft versions remain fatal."; };
           worlds = mkOption { type = types.attrsOf worldType; default = { }; description = "Read-only input worlds."; };
           maps = mkOption { type = types.listOf mapType; default = [ ]; description = "Maps and rotations to generate."; };
         };

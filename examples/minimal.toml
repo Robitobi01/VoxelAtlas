@@ -1,0 +1,27 @@
+output = "./output"
+textures = "/path/to/extracted-1.12.2-textures"
+workers = 4
+cache_mib = 128
+tile_size = 512
+encoding = "fast" # "compact": exact, more CPU; "indexed": smaller, changes colors/alpha
+
+[worlds.survival]
+path = "/path/to/Survival"
+dimension = "overworld"
+
+[[maps]]
+id = "Survival-Overworld"
+world = "survival"
+view = "isometric"
+rotations = [0, 1, 2, 3]
+mode = "daylight"
+water_opacity = 0.8
+lighting_water_intensity = 0.5
+default_zoom = 7
+
+[[maps]]
+id = "Survival-Overworld-Top"
+world = "survival"
+view = "topdown"
+rotations = [0]
+mode = "daylight"

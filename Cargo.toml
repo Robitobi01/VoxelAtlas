@@ -1,0 +1,30 @@
+[package]
+name = "voxelatlas"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Offline Minecraft Java 1.12.2 map renderer for static hosting"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+fastnbt = "2"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+indicatif = "0.17"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+webp = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

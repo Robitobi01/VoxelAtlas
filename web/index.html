@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#080b0d">
+  <title>Voxel Atlas</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main id="viewer">
+    <canvas id="map" tabindex="0" aria-label="Minecraft map. Drag to pan, scroll or pinch to zoom. Arrow keys pan; plus and minus zoom; Home fits the map."></canvas>
+    <header class="topbar panel">
+      <a class="brand" href="./" aria-label="Voxel Atlas home"><span class="brand-icon" aria-hidden="true">▧</span><span>Voxel<span class="brand-light">Atlas</span><small>YOUR WORLD, AT A GLANCE</small></span></a>
+      <div class="map-controls">
+        <label class="field"><span>Map</span><select id="map-select" disabled aria-label="Map"><option>Loading maps…</option></select></label>
+        <label class="field rotation-field"><span>Rotation</span><select id="rotation-select" disabled aria-label="Rotation"></select></label>
+      </div>
+      <span id="connection" class="connection" role="status">Connecting</span>
+    </header>
+
+    <aside class="layers panel" aria-label="Map layers">
+      <span class="section-label">LAYERS</span>
+      <button id="players-toggle" class="layer-button" type="button" aria-pressed="true"><span class="layer-icon player-icon" aria-hidden="true">●</span><span>Players <small id="players-count">Waiting for live data</small></span><span class="toggle" aria-hidden="true"></span></button>
+      <button id="chunks-toggle" class="layer-button" type="button" aria-pressed="false"><span class="layer-icon" aria-hidden="true">▦</span><span>Live chunks <small id="chunks-status">Optional overlay</small></span><span class="toggle" aria-hidden="true"></span></button>
+      <div id="chunk-legend" class="chunk-legend" hidden><span><i class="chunk-lazy"></i>Lazy</span><span><i class="chunk-entity"></i>Entity-ticking (inferred)</span><span><i class="chunk-player"></i>Player vicinity</span></div>
+      <p id="map-description" class="map-description">Explore your Minecraft world.</p>
+    </aside>
+
+    <div id="message" class="message panel" role="status"><span class="message-icon" aria-hidden="true">◇</span><h1 id="message-title">Opening your world</h1><p id="message-detail">Loading the latest map snapshot…</p><button id="retry" type="button" hidden>Try again</button></div>
+
+    <nav class="navigation panel" aria-label="Map navigation">
+      <button id="zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
+      <button id="zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
+      <span class="divider"></span>
+      <button id="fit" type="button" title="Fit world (Home)" aria-label="Fit world">⌖</button>
+      <button id="share" type="button" title="Copy link to this view" aria-label="Copy link to this view">↗</button>
+    </nav>
+
+    <footer class="bottom-bar">
+      <div class="coordinates panel"><span class="status-dot" aria-hidden="true"></span><span id="coordinates">X — &nbsp; Z —</span><span id="height-note" hidden>Y = 0</span></div>
+      <div class="scale panel"><span id="scale-bar"></span><span id="scale-label">— blocks</span><span id="zoom-label">—</span></div>
+      <span class="hint">Drag to explore <span>·</span> Scroll to zoom</span>
+    </footer>
+    <div id="toast" class="toast panel" role="status" hidden></div>
+  </main>
+</body>
+</html>

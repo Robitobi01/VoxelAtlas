@@ -146,8 +146,8 @@
 
   function minScale() {
     // Keep the lowest-resolution viewport below 256 tiles, even on large monitors.
-    return state.map ? 2 ** state.map.min_zoom * Math.max(.25,
-      state.width / (state.manifest.tile_size * 14), state.height / (state.manifest.tile_size * 14)) : .001;
+    return state.map ? Math.max(.0003, 2 ** state.map.min_zoom * Math.max(.25,
+      state.width / (state.manifest.tile_size * 14), state.height / (state.manifest.tile_size * 14))) : .0003;
   }
   function fitMap() {
     if (!state.map) return;

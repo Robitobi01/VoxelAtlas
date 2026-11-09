@@ -115,12 +115,12 @@ in {
     };
     memoryMax = mkOption {
       type = types.str;
-      default = "2G";
+      default = "3G";
       description = "Hard aggregate systemd memory limit for all VoxelAtlas jobs, also applied per job; size workers and cache_mib accordingly.";
     };
     memoryHigh = mkOption {
       type = types.str;
-      default = "1536M";
+      default = "2560M";
       description = "Aggregate systemd memory pressure threshold, also applied per job; keep below memoryMax.";
     };
     memorySwapMax = mkOption {

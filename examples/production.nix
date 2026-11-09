@@ -43,8 +43,8 @@ in {
     enable = true;
     # Grant read/traverse access via the Minecraft group; do not chown worlds.
     supplementaryGroups = [ "mc" ];
-    memoryMax = "2G";
-    memoryHigh = "1536M";
+    memoryMax = "3G";
+    memoryHigh = "2560M";
     memorySwapMax = "0";
     cpuQuota = "";
     render.schedule = "*-*-* 0/3:00:00";

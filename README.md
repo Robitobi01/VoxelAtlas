@@ -30,7 +30,7 @@ Import `inputs.voxelatlas.nixosModules.default`; adapt
 [examples/production.nix](examples/production.nix) for services, timers, and nginx.
 Use snapshots for world paths and grant the service read access. Set `workers`,
 `memoryMax`, and optionally `cpuQuota` explicitly; low priority is not isolation.
-Defaults: 2 GiB shared hard memory limit, no swap, Nice 19, CPU/IO weight 1,
+Defaults: 3 GiB shared hard limit, 2.5 GiB pressure threshold, no swap, Nice 19, CPU/IO weight 1,
 and idle I/O scheduling. The 128 MiB decoded-chunk cache is not a total RAM limit.
 
 ```sh

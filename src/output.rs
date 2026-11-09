@@ -5,7 +5,7 @@ use crate::{
     config::{Config, Encoding, MapConfig, Mode, View},
     progress::Progress,
     render,
-    world::{RegionFingerprint, World},
+    world::{Fingerprint, RegionFingerprint, World},
 };
 use anyhow::{Context, Result, bail};
 use image::RgbaImage;
@@ -61,7 +61,7 @@ struct State {
     #[serde(default)]
     map_signatures: BTreeMap<String, String>,
     #[serde(default)]
-    render_chunks: BTreeMap<String, BTreeMap<String, String>>,
+    render_chunks: BTreeMap<String, BTreeMap<String, Fingerprint>>,
 }
 #[derive(Debug, Default, Serialize)]
 pub struct RenderStats {
@@ -81,6 +81,36 @@ pub struct RenderStats {
     pub skipped_corrupt_chunks: usize,
 }
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_with(path, |file| {
+        file.write_all(bytes)?;
+        Ok(())
+    })
+}
+fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    atomic_write_with(path, |file| {
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut writer, value)?;
+        writer.flush()?;
+        Ok(())
+    })
+}
+
+/// Large phase-local trees and worker scratch can otherwise remain resident in
+/// glibc arenas after Rust drops them, consuming the cgroup's file-cache budget.
+fn release_unused_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> std::ffi::c_int;
+        }
+        // SAFETY: glibc's thread-safe API only releases allocator-owned free
+        // pages. No live Rust allocations are moved or invalidated.
+        unsafe {
+            malloc_trim(0);
+        }
+    }
+}
+fn atomic_write_with(path: &Path, write: impl FnOnce(&mut fs::File) -> Result<()>) -> Result<()> {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().context("output has no parent directory")?;
     fs::create_dir_all(parent)?;
@@ -95,7 +125,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             .create_new(true)
             .write(true)
             .open(&temp)?;
-        file.write_all(bytes)?;
+        write(&mut file)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
         fs::File::open(parent)?.sync_all()?;
@@ -302,6 +332,9 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
     fs::create_dir_all(config.output.join("indexes"))?;
     // Loading assets before changing output makes invalid asset configurations fail safely.
     let assets = Assets::load(&config.textures)?;
+    if !config.output.join("current.json").exists() && !config.output.join("index.html").exists() {
+        atomic_write(&config.output.join("index.html"), b"<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><meta http-equiv=refresh content=60><title>VoxelAtlas: awaiting first map</title><style>body{background:#101820;color:#e8eef5;font:18px system-ui;max-width:700px;margin:15vh auto;padding:24px}</style><h1>Map not published yet</h1><p>The first complete generation is not available yet. The viewer will replace this page when rendering finishes.</p><p>If rendering has stopped, check the VoxelAtlas service logs. This page refreshes every minute.</p></html>")?;
+    }
     let mut signature = blake3::Hasher::new();
     // Resource/output-location changes must not force an expensive visual rebuild.
     signature.update(&config.tile_size.to_le_bytes());
@@ -317,8 +350,8 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
     signature.update(include_bytes!("../Cargo.lock"));
     let signature = signature.finalize().to_hex().to_string();
     let state_path = config.output.join(".state/index.json");
-    let mut old_state: State = match fs::read(&state_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
+    let mut old_state: State = match fs::File::open(&state_path) {
+        Ok(file) => serde_json::from_reader(std::io::BufReader::new(file))
             .context("invalid incremental state; use --force after removing damaged state")?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
         Err(e) => return Err(e.into()),
@@ -351,6 +384,11 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
     let layout_changed = layout_signature != old_state.layout_signature
         || map_signatures != old_state.map_signatures;
     let mut render_chunks = std::mem::take(&mut old_state.render_chunks);
+    if full {
+        // A complete rebuild repopulates this cache; don't retain hashes for
+        // deleted chunks or worlds that no longer contribute a view.
+        render_chunks.clear();
+    }
     render_chunks.retain(|id, _| config.worlds.contains_key(id));
     let mut state = State {
         signature,
@@ -410,6 +448,16 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
     }
     let mut changed = BTreeMap::<String, BTreeSet<(i32, i32)>>::new();
     for id in config.worlds.keys() {
+        if full {
+            // A full view derives its work from the world's chunk index below;
+            // retaining a second world-sized dirty tree adds no information.
+            stats.chunks_changed += state.regions[id]
+                .values()
+                .map(|region| region.chunks.len())
+                .sum::<usize>();
+            changed.insert(id.clone(), BTreeSet::new());
+            continue;
+        }
         let now: BTreeMap<_, _> = state.regions[id]
             .values()
             .flat_map(|r| r.chunks.iter())
@@ -447,7 +495,7 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
                         positions.insert(pos);
                         continue;
                     };
-                    let hash = chunk.render_fingerprint();
+                    let hash = chunk.render_digest();
                     if render_hashes.get(key) != Some(&hash) {
                         positions.insert(pos);
                     } else {
@@ -472,9 +520,8 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
             world.check_consistent()?;
         }
         // Refresh stat-cache stamps without rewriting tiles or the public manifest.
-        let bytes = serde_json::to_vec(&state)?;
-        if fs::read(&state_path).ok().as_deref() != Some(bytes.as_slice()) {
-            atomic_write(&state_path, &bytes)?;
+        if state.regions != old_state.regions {
+            atomic_write_json(&state_path, &state)?;
         }
         install_viewer(&config.output)?;
         stats.skipped_corrupt_chunks = opened.values().map(|world| world.skipped_chunks()).sum();
@@ -482,6 +529,10 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
         tracing::info!("World content and settings unchanged; no output rewritten");
         return Ok(stats);
     }
+    // Rasterization only needs the old per-view signatures, not duplicate
+    // copies of every compressed chunk fingerprint from the previous run.
+    old_state.regions.clear();
+    release_unused_memory();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(config.workers)
         .build()?;
@@ -495,7 +546,7 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
     let compact_base =
         (config.encoding == Encoding::Compact).then(|| TileEncoder::compact(&config.output, true));
     let mut maps = Vec::new();
-    for map in &config.maps {
+    for (map_index, map) in config.maps.iter().enumerate() {
         let world = &worlds[&map.world];
         let exclusions: Vec<_> = config.worlds[&map.world]
             .exclude
@@ -596,6 +647,7 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
                 }
             }
             stats.base_tiles_rendered += dirty.len();
+            release_unused_memory();
             manifest.bounds = map_bounds(&manifest.tiles, config.tile_size)?;
             let old_min_zoom = manifest.min_zoom;
             let pyramid_start = std::time::Instant::now();
@@ -658,18 +710,36 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
                 map.id
             ));
             store_indexes(&config.output, &mut manifest)?;
+            release_unused_memory();
             maps.push(manifest);
+        }
+        if !config.maps[map_index + 1..]
+            .iter()
+            .any(|later| later.world == map.world)
+        {
+            changed.remove(&map.world);
         }
     }
     // Never publish holes caused by unreadable chunks or a changing source world.
     // The previous complete generation stays available if consistency fails.
-    for (id, world) in &worlds {
+    for world in opened.values() {
         world.check_consistent()?;
-        state
-            .render_chunks
-            .entry(id.clone())
-            .or_default()
-            .extend(world.decoded_render_fingerprints());
+        let decoded = world.take_render_fingerprints();
+        let mut aliases = worlds
+            .iter()
+            .filter(|(_, other)| Arc::ptr_eq(world, other))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        if let Some(last) = aliases.pop() {
+            for id in aliases {
+                state
+                    .render_chunks
+                    .entry(id)
+                    .or_default()
+                    .extend(decoded.iter().map(|(k, v)| (k.clone(), *v)));
+            }
+            state.render_chunks.entry(last).or_default().extend(decoded);
+        }
     }
     stats.skipped_corrupt_chunks = opened.values().map(|world| world.skipped_chunks()).sum();
     stats.encoded_tiles = encoder.encoded.load(Ordering::Relaxed);
@@ -698,7 +768,7 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
         &bytes,
     )?;
     atomic_write(&config.output.join("current.json"), &bytes)?;
-    atomic_write(&state_path, &serde_json::to_vec(&state)?)?;
+    atomic_write_json(&state_path, &state)?;
     Ok(stats)
 }
 fn install_viewer(output: &Path) -> Result<()> {

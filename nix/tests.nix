@@ -34,8 +34,8 @@ in {
     assert pkgs.lib.all (item: item.assertion) cfg.assertions;
     assert render.serviceConfig.ProtectSystem == "strict";
     assert render.serviceConfig.ReadWritePaths == [ "/var/lib/voxelatlas" ];
-    assert render.serviceConfig.MemoryMax == "2G";
-    assert render.serviceConfig.MemoryHigh == "1536M";
+    assert render.serviceConfig.MemoryMax == "3G";
+    assert render.serviceConfig.MemoryHigh == "2560M";
     assert render.serviceConfig.MemorySwapMax == "0";
     # No CPU quota by default: renders use leftover capacity at Nice 19,
     # CPUWeight 1 and idle I/O priority rather than being capped.
@@ -46,7 +46,7 @@ in {
     assert render.serviceConfig.Nice == 19;
     assert render.serviceConfig.IOSchedulingClass == "idle";
     assert render.serviceConfig.Slice == "voxelatlas.slice";
-    assert cfg.systemd.slices.voxelatlas.sliceConfig.MemoryMax == "2G";
+    assert cfg.systemd.slices.voxelatlas.sliceConfig.MemoryMax == "3G";
     assert cfg.systemd.slices.voxelatlas.sliceConfig.CPUWeight == 1;
     assert cfg.systemd.timers.voxelatlas-render.timerConfig.OnCalendar == "*-*-* 0/3:00:00";
     assert cfg.systemd.timers.voxelatlas-update-data.timerConfig.OnCalendar == "*-*-* *:*:00";

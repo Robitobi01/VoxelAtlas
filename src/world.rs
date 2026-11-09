@@ -44,6 +44,9 @@ impl Chunk {
     pub fn render_fingerprint(&self) -> String {
         self.render_hash().to_hex().to_string()
     }
+    pub fn render_digest(&self) -> Fingerprint {
+        self.render_hash().into()
+    }
 
     fn render_hash(&self) -> blake3::Hash {
         let mut hash = blake3::Hasher::new();
@@ -174,7 +177,7 @@ struct Section {
 }
 
 struct Location {
-    region: String,
+    region: Arc<str>,
     offset: u64,
     sectors: u8,
     invalid: Option<String>,
@@ -182,10 +185,46 @@ struct Location {
 
 /// Persistent per-region fingerprint cache. This is a filesystem-change cache,
 /// not an integrity guarantee: use `verify=true` to distrust saved chunk hashes.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegionFingerprint {
-    pub chunks: BTreeMap<String, String>,
+    pub chunks: BTreeMap<String, Fingerprint>,
     stamp: RegionStamp,
+}
+
+/// Keep digests inline in memory; retain the existing hexadecimal JSON format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fingerprint([u8; 32]);
+impl From<blake3::Hash> for Fingerprint {
+    fn from(hash: blake3::Hash) -> Self {
+        Self(*hash.as_bytes())
+    }
+}
+impl Serialize for Fingerprint {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(blake3::Hash::from_bytes(self.0).to_hex().as_str())
+    }
+}
+impl<'de> Deserialize<'de> for Fingerprint {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = Fingerprint;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a 64-character BLAKE3 digest")
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Fingerprint, E> {
+                blake3::Hash::from_hex(value)
+                    .map(Fingerprint::from)
+                    .map_err(E::custom)
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
+}
+impl std::fmt::Display for Fingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        blake3::Hash::from_bytes(self.0).to_hex().fmt(f)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +365,7 @@ impl World {
             let Some((rx, rz)) = region_coordinates(name) else {
                 continue;
             };
+            let region_name: Arc<str> = Arc::from(name);
             let file = File::open(entry.path())?;
             let stamp = RegionStamp::from_metadata(&file.metadata()?);
             let size = stamp.size;
@@ -376,7 +416,7 @@ impl World {
                 locations.insert(
                     (x, z),
                     Location {
-                        region: name.to_owned(),
+                        region: region_name.clone(),
                         offset: sector * SECTOR,
                         sectors,
                         invalid,
@@ -391,7 +431,7 @@ impl World {
         if skip_corrupt_chunks {
             locations.retain(|_, location| {
                 if location.invalid.is_some() {
-                    *rejected.entry(location.region.clone()).or_default() += 1;
+                    *rejected.entry(location.region.to_string()).or_default() += 1;
                     false
                 } else {
                     true
@@ -460,7 +500,7 @@ impl World {
     fn skip_corruption(&self, x: i32, z: i32, error: &anyhow::Error) -> bool {
         if self.skip_corrupt_chunks && error.is::<CorruptChunk>() {
             if self.cache.lock().unwrap().skipped.insert((x, z)) {
-                tracing::warn!(chunk_x = x, chunk_z = z, region = %self.regions[&self.locations[&(x,z)].region].path.display(),
+                tracing::warn!(chunk_x = x, chunk_z = z, region = %self.regions[self.locations[&(x,z)].region.as_ref()].path.display(),
                     "Skipping corrupt chunk; source file is unchanged: {error:#}");
             }
             true
@@ -480,6 +520,15 @@ impl World {
             .render_hashes
             .iter()
             .map(|(&(x, z), hash)| (format!("{x},{z}"), hash.to_hex().to_string()))
+            .collect()
+    }
+
+    /// Transfer checkpoint metadata instead of retaining both a decoded-hash
+    /// index and an expanded hexadecimal copy during publication.
+    pub fn take_render_fingerprints(&self) -> BTreeMap<String, Fingerprint> {
+        std::mem::take(&mut self.cache.lock().unwrap().render_hashes)
+            .into_iter()
+            .map(|((x, z), hash)| (format!("{x},{z}"), hash.into()))
             .collect()
     }
 
@@ -527,7 +576,7 @@ impl World {
         }
         drop(cache);
         let decoded = (|| {
-            let region = &self.regions[&location.region];
+            let region = &self.regions[location.region.as_ref()];
             let (compression, payload) = {
                 let file = File::open(&region.path)?;
                 region.check_file(&file)?;
@@ -598,6 +647,7 @@ impl World {
             .fingerprints_cached(&BTreeMap::new(), true)?
             .into_values()
             .flat_map(|region| region.chunks)
+            .map(|(key, hash)| (key, hash.to_string()))
             .collect())
     }
 
@@ -671,11 +721,11 @@ impl World {
     }
 }
 
-fn payload_hash(compression: u8, payload: &[u8]) -> String {
+fn payload_hash(compression: u8, payload: &[u8]) -> Fingerprint {
     let mut hash = blake3::Hasher::new();
     hash.update(&[compression]);
     hash.update(payload);
-    hash.finalize().to_hex().to_string()
+    hash.finalize().into()
 }
 
 fn read_payload(location: &Location, file: &File) -> Result<(u8, Vec<u8>)> {
@@ -932,9 +982,36 @@ mod tests {
             assert_eq!(a.last_update, 123456);
             assert!(Arc::ptr_eq(&a, &b));
             let hashes = world.fingerprints().unwrap();
-            assert_eq!(hashes["-1,-1"], payload_hash(compression, &payload));
+            assert_eq!(
+                hashes["-1,-1"],
+                payload_hash(compression, &payload).to_string()
+            );
             assert_eq!(hashes, world.fingerprints().unwrap());
         }
+    }
+
+    #[test]
+    fn compact_fingerprints_preserve_legacy_json_without_heap_owned_hex() {
+        let hash = blake3::hash(b"checkpoint compatibility");
+        let compact = Fingerprint::from(hash);
+        assert_eq!(std::mem::size_of::<Fingerprint>(), 32);
+        let legacy = serde_json::to_string(&hash.to_hex().to_string()).unwrap();
+        assert_eq!(serde_json::to_string(&compact).unwrap(), legacy);
+        assert_eq!(
+            serde_json::from_str::<Fingerprint>(&legacy).unwrap(),
+            compact
+        );
+        assert!(serde_json::from_str::<Fingerprint>("\"invalid\"").is_err());
+    }
+
+    #[test]
+    fn checkpoint_hash_transfer_releases_the_decoded_metadata_index() {
+        let (dir, _) = fixture(1343, 2);
+        let world = World::open(dir.path(), 1024 * 1024).unwrap();
+        let digest = world.get_chunk(-1, -1).unwrap().unwrap().render_digest();
+        let transferred = world.take_render_fingerprints();
+        assert_eq!(transferred["-1,-1"], digest);
+        assert!(world.cache.lock().unwrap().render_hashes.is_empty());
     }
 
     #[test]
@@ -1291,11 +1368,11 @@ mod tests {
             .get_mut("r.-1.-1.mca")
             .unwrap()
             .chunks
-            .insert("-1,-1".into(), "saved-hash".into());
+            .insert("-1,-1".into(), blake3::hash(b"saved-hash").into());
         let reopened = World::open(dir.path(), 0).unwrap();
         assert_eq!(
             reopened.fingerprints_cached(&previous, false).unwrap()["r.-1.-1.mca"].chunks["-1,-1"],
-            "saved-hash"
+            Fingerprint::from(blake3::hash(b"saved-hash"))
         );
         assert_eq!(
             reopened.fingerprints_cached(&previous, true).unwrap()["r.-1.-1.mca"].chunks,

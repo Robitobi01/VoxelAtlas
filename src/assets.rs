@@ -93,6 +93,72 @@ impl Assets {
         if names.is_empty() {
             bail!("no PNG block textures found in {}", root.display());
         }
+        // Base surfaces for blocks using entity/environment atlases. Geometry
+        // remains approximate; tile-entity colors, text and patterns are deferred.
+        for (file, width, height, regions) in [
+            (
+                "entity/bed/red.png",
+                64,
+                64,
+                &[
+                    ("bed_head_top", [6, 6, 16, 16]),
+                    ("bed_feet_top", [6, 28, 16, 16]),
+                    ("bed_head_side", [22, 6, 6, 16]),
+                    ("bed_feet_side", [22, 28, 6, 16]),
+                ][..],
+            ),
+            (
+                "entity/sign.png",
+                64,
+                32,
+                &[("sign_board", [2, 2, 24, 12])][..],
+            ),
+            (
+                "entity/skeleton/skeleton.png",
+                64,
+                32,
+                &[("skull_top", [8, 0, 8, 8]), ("skull_side", [8, 8, 8, 8])][..],
+            ),
+            (
+                "entity/banner_base.png",
+                64,
+                64,
+                &[("banner_base", [1, 1, 20, 40])][..],
+            ),
+            (
+                "environment/end_sky.png",
+                128,
+                128,
+                &[("end_portal", [0, 0, 128, 128])][..],
+            ),
+        ] {
+            let path = root.join(file);
+            if !path.exists() {
+                continue;
+            }
+            let bytes = std::fs::read(&path)?;
+            hash.update(file.as_bytes());
+            hash.update(&bytes);
+            let atlas = image::load_from_memory(&bytes)?.to_rgba8();
+            if atlas.width() < width || atlas.width() % width != 0 {
+                bail!("invalid atlas dimensions: {}", path.display());
+            }
+            let scale = atlas.width() / width;
+            if atlas.height() < height * scale {
+                bail!("invalid atlas dimensions: {}", path.display());
+            }
+            for &(name, [x, y, w, h]) in regions {
+                let region =
+                    image::imageops::crop_imm(&atlas, x * scale, y * scale, w * scale, h * scale);
+                names.insert(name.to_owned(), textures.len());
+                textures.push(image::imageops::resize(
+                    &region.to_image(),
+                    16,
+                    16,
+                    FilterType::Nearest,
+                ));
+            }
+        }
         // Chests moved out of blocks/ in vanilla. Use their actual entity atlas
         // for a single-chest cuboid approximation, not misleading oak planks.
         for (kind, file) in [
@@ -349,7 +415,6 @@ fn texture_names(id: u16, d: u8) -> (String, String, String) {
     let one = |s: &str| (s.to_owned(), s.to_owned(), s.to_owned());
     let faces = |t: &str, s: &str, b: &str| (t.to_owned(), s.to_owned(), b.to_owned());
     match id {
-        6 if d & 7 == 5 => return one("sapling_roofed_oak"),
         59 => return one(&format!("wheat_stage_{}", d.min(7))),
         115 => {
             return one(&format!(
@@ -474,7 +539,11 @@ fn texture_names(id: u16, d: u8) -> (String, String, String) {
         }),
         4 => one("cobblestone"),
         5 => one(&format!("planks_{}", wood[usize::from(d.min(5))])),
-        6 => one(&format!("sapling_{}", wood[usize::from(d.min(5))])),
+        6 => one(&format!(
+            "sapling_{}",
+            ["oak", "spruce", "birch", "jungle", "acacia", "roofed_oak"]
+                [usize::from((d & 7).min(5))]
+        )),
         7 => one("bedrock"),
         8 | 9 => one("water_still"),
         10 | 11 => one("lava_still"),
@@ -520,7 +589,19 @@ fn texture_names(id: u16, d: u8) -> (String, String, String) {
             "sandstone_bottom",
         ),
         25 => one("noteblock"),
-        26 => one("bed_feet_top"),
+        26 => faces(
+            if d & 8 != 0 {
+                "bed_head_top"
+            } else {
+                "bed_feet_top"
+            },
+            if d & 8 != 0 {
+                "bed_head_side"
+            } else {
+                "bed_feet_side"
+            },
+            "planks_oak",
+        ),
         27 => one("rail_golden"),
         28 => one("rail_detector"),
         29 | 33 => one("piston_side"),
@@ -590,11 +671,14 @@ fn texture_names(id: u16, d: u8) -> (String, String, String) {
             "dirt",
         ),
         61 | 62 => faces("furnace_top", "furnace_side", "furnace_top"),
+        63 | 68 => one("sign_board"),
         64 => one("door_wood_lower"),
         65 => one("ladder"),
         66 => one("rail_normal"),
         67 => one("cobblestone"),
+        70 => one("stone"),
         71 => one("door_iron_lower"),
+        72 => one("planks_oak"),
         73 | 74 => one("redstone_ore"),
         75 => one("redstone_torch_off"),
         76 => one("redstone_torch_on"),
@@ -641,6 +725,7 @@ fn texture_names(id: u16, d: u8) -> (String, String, String) {
             "enchanting_table_side",
             "enchanting_table_bottom",
         ),
+        119 | 209 => one("end_portal"),
         121 => one("end_stone"),
         122 => one("dragon_egg"),
         123 | 124 => one(if id == 123 {
@@ -662,7 +747,10 @@ fn texture_names(id: u16, d: u8) -> (String, String, String) {
         }),
         141 => one(&format!("carrots_stage{}", (d / 2).min(3))),
         142 => one(&format!("potatoes_stage{}", (d / 2).min(3))),
+        144 => faces("skull_top", "skull_side", "skull_top"),
         145 => one("anvil_base"),
+        147 => one("gold_block"),
+        148 => one("iron_block"),
         152 => one("redstone_block"),
         153 => one("quartz_ore"),
         155 | 156 => faces(
@@ -670,6 +758,11 @@ fn texture_names(id: u16, d: u8) -> (String, String, String) {
             "quartz_block_side",
             "quartz_block_bottom",
         ),
+        157 => one(if d & 8 != 0 {
+            "rail_activator_powered"
+        } else {
+            "rail_activator"
+        }),
         159 => one(&format!("hardened_clay_stained_{}", colors[usize::from(d)])),
         163 => one("planks_acacia"),
         164 => one("planks_big_oak"),
@@ -693,6 +786,7 @@ fn texture_names(id: u16, d: u8) -> (String, String, String) {
             "double_plant_rose_bottom",
             "double_plant_paeonia_bottom",
         ][usize::from((d & 7).min(5))]),
+        176 | 177 => one("banner_base"),
         179..=182 => faces(
             "red_sandstone_top",
             "red_sandstone_normal",
@@ -821,6 +915,75 @@ fn directional_names(id: u16, d: u8, mut top: String, side: &str) -> (String, [S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registered_vanilla_blocks_have_texture_mappings() {
+        for id in (0..=252).chain([255]) {
+            if shape(id) == Shape::Air {
+                continue;
+            }
+            for data in 0..16 {
+                let (top, side, bottom) = texture_names(id, data);
+                let (top, sides) = directional_names(id, data, top, &side);
+                for name in [top, bottom].into_iter().chain(sides) {
+                    assert_ne!(name, "missing", "unmapped vanilla block {id}:{data}");
+                }
+            }
+        }
+        for (id, name) in [
+            (70, "stone"),
+            (72, "planks_oak"),
+            (147, "gold_block"),
+            (148, "iron_block"),
+        ] {
+            for data in 0..16 {
+                assert_eq!(texture_names(id, data).0, name);
+            }
+        }
+        assert_eq!(texture_names(6, 8).0, "sapling_oak");
+        assert_eq!(texture_names(6, 13).0, "sapling_roofed_oak");
+        assert_eq!(texture_names(157, 8).0, "rail_activator_powered");
+    }
+    #[test]
+    fn entity_and_environment_surfaces_resolve_and_are_hashed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("blocks")).unwrap();
+        RgbaImage::from_pixel(16, 16, image::Rgba([180, 150, 100, 255]))
+            .save(dir.path().join("blocks/planks_oak.png"))
+            .unwrap();
+        for (file, width, height) in [
+            ("entity/bed/red.png", 64, 64),
+            ("entity/sign.png", 64, 32),
+            ("entity/skeleton/skeleton.png", 64, 32),
+            ("entity/banner_base.png", 64, 64),
+            ("environment/end_sky.png", 128, 128),
+        ] {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            RgbaImage::from_pixel(width, height, image::Rgba([80, 120, 160, 255]))
+                .save(path)
+                .unwrap();
+        }
+        let assets = Assets::load(dir.path()).unwrap();
+        for id in [26, 63, 68, 119, 144, 176, 177, 209] {
+            for data in 0..16 {
+                assert!(
+                    !assets.unknown[id * 16 + data],
+                    "unresolved atlas block {id}:{data}"
+                );
+                assert_eq!(
+                    assets.texels(assets.material(id as u16, data as u8).top)[0],
+                    [80, 120, 160, 255]
+                );
+            }
+        }
+        RgbaImage::from_pixel(128, 128, image::Rgba([160, 120, 80, 255]))
+            .save(dir.path().join("environment/end_sky.png"))
+            .unwrap();
+        assert_ne!(
+            assets.fingerprint(),
+            Assets::load(dir.path()).unwrap().fingerprint()
+        );
+    }
     #[test]
     fn technical_materials_resolve_every_metadata_variant() {
         let dir = tempfile::tempdir().unwrap();

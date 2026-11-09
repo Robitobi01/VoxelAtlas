@@ -16,6 +16,7 @@ cp examples/minimal.toml render.toml
 
 Supply your own extracted `assets/minecraft/textures/` directory and a stable
 world snapshot. Inputs are read-only; snapshots are not created automatically.
+Use `mode = "plain"` for Nether and End maps, which have no skylight.
 Non-Nix builds: Rust 1.89+ and a C toolchain, then `cargo build --release`.
 
 Encoding: `fast` (default, exact), `compact` (exact, more CPU), or `indexed`

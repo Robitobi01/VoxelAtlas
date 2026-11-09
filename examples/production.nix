@@ -22,7 +22,7 @@ let
       inherit world;
       view = "isometric";
       rotations = [ 0 1 2 3 ];
-      mode = if world == "survival_nether" then "plain" else "daylight";
+      mode = if builtins.elem world [ "survival_nether" "survival_end" ] then "plain" else "daylight";
       water_opacity = 0.8;
       lighting_water_intensity = 0.5;
       default_zoom = 7;
@@ -32,7 +32,7 @@ let
       inherit world;
       view = "topdown";
       rotations = [ 0 ];
-      mode = if world == "survival_nether" then "plain" else "daylight";
+      mode = if builtins.elem world [ "survival_nether" "survival_end" ] then "plain" else "daylight";
       water_opacity = 0.8;
       lighting_water_intensity = 0.5;
       default_zoom = 7;

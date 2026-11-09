@@ -7,7 +7,7 @@ server required.
 ## Run
 
 ```sh
-nix build
+nix-build
 cp examples/minimal.toml render.toml
 # Set world and texture paths in render.toml.
 ./result/bin/voxelatlas validate --config render.toml
@@ -26,12 +26,15 @@ Old tiles are retained until `voxelatlas gc --config render.toml`.
 
 ## NixOS
 
-Import `inputs.voxelatlas.nixosModules.default`; adapt
+Import `source + "/nix/module.nix"` from a revision-and-hash-pinned
+`builtins.fetchTarball` or `pkgs.fetchFromGitHub`; adapt
 [examples/production.nix](examples/production.nix) for services, timers, and nginx.
 Use snapshots for world paths and grant the service read access. Set `workers`,
 `memoryMax`, and optionally `cpuQuota` explicitly; low priority is not isolation.
 Defaults: 3 GiB shared hard limit, 2.5 GiB pressure threshold, no swap, Nice 19, CPU/IO weight 1,
 and idle I/O scheduling. The 128 MiB decoded-chunk cache is not a total RAM limit.
+The package and module use your host's nixpkgs; no flakes or second nixpkgs import.
+Keep production settings and external assets outside this repository.
 
 ```sh
 sudo systemctl start voxelatlas-render
@@ -46,9 +49,8 @@ Validate a separate preview before replacing an existing deployment.
 ## Check
 
 ```sh
-nix develop --command cargo test --release --all-targets
-nix develop --command cargo clippy --all-targets -- -D warnings
-nix flake check
+nix-shell --run 'cargo test --release --all-targets'
+nix-shell --run 'cargo clippy --all-targets -- -D warnings'
 ```
 
 MIT; see [LICENSE](LICENSE). No Minecraft assets or worlds included.

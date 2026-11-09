@@ -1,4 +1,4 @@
-# Import alongside the flake's nixosModules.default (or ../nix/module.nix).
+# Import alongside ../nix/module.nix from a commit-pinned source.
 # Replace the placeholder paths and use stable snapshots for rendering.
 # This example uses a separate preview URL.
 { ... }:

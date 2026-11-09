@@ -67,9 +67,19 @@
           : manifest.maps.find(m => m.id === previous?.id && m.rotation === previous.rotation);
         selectMap(selected || manifest.maps[0], !previous || !selected);
         if (initialState && selected && ['x', 'y', 'scale'].every(k => params.has(k) && finite(Number(params.get(k))))) {
-          state.x = clamp(Number(params.get('x')), -(2 ** 45), 2 ** 45);
-          state.y = clamp(Number(params.get('y')), -(2 ** 45), 2 ** 45);
-          state.scale = clamp(Number(params.get('scale')), minScale(), 8);
+          const x = Number(params.get('x')), y = Number(params.get('y')), scale = Number(params.get('scale'));
+          // The previous viewer auto-saved this unusable camera on worlds with
+          // far-away chunks. Recover those exact defaults, not other shared views.
+          const oldScale = 2 ** (selected.min_zoom + Math.min(selected.default_zoom, -selected.min_zoom));
+          const legacyDefault = selected.min_zoom <= -16 && Number.isInteger(selected.default_zoom) &&
+            Math.abs(x - (selected.bounds[0] + selected.bounds[2]) / 2) < .01 &&
+            Math.abs(y - (selected.bounds[1] + selected.bounds[3]) / 2) < .01 &&
+            Math.abs(scale - oldScale) < oldScale * .000001;
+          if (!legacyDefault) {
+            state.x = clamp(x, -(2 ** 45), 2 ** 45);
+            state.y = clamp(y, -(2 ** 45), 2 ** 45);
+            state.scale = clamp(scale, minScale(), 8);
+          } else changed();
           requestDraw();
         }
         initialState = false;
@@ -121,10 +131,13 @@
     $('chunks-toggle').disabled = map.view !== 'topdown';
     updateLiveLabels();
     if (fit && !sameProjection) {
-      fitMap();
-      if (!previous && Number.isInteger(map.default_zoom) && map.default_zoom >= 0) {
-        state.scale = clamp(2 ** (map.min_zoom + Math.min(map.default_zoom, -map.min_zoom)), minScale(), 8);
-      }
+      if (Number.isInteger(map.default_zoom) && map.default_zoom >= 0) {
+        // Match the configured origin view. Global bounds can include distant
+        // border/outpost chunks; neither the center nor default detail should
+        // depend on their distance. Zoom 9 is native resolution; 7 is quarter.
+        state.x = 0; state.y = 0;
+        state.scale = clamp(2 ** (Math.min(map.default_zoom, 12) - 9), minScale(), 8);
+      } else fitMap();
     } else if (center) {
       [state.x, state.y] = project(center[0], 0, center[1]);
       state.scale = clamp(state.scale, minScale(), 8);

@@ -101,12 +101,12 @@ test('index requests are capped at four and completed shard LRU at 128', async (
   assert.equal(v.indexes.has('old-0'), false);
 });
 
-test('rotations preserve world-plane center; projection changes fit; initial default zoom is used', async () => {
+test('rotations preserve world-plane center; projection changes reset; default zoom is independent of extent', async () => {
   const a = map({ view: 'isometric', default_zoom: 7 });
   const b = map({ view: 'isometric', rotation: 1 });
   const c = map({ id: 'top' });
   const v = await viewer(root([a, b, c]));
-  assert.equal(v.state.scale, .5); // -8 + min(7, 8)
+  assert.equal(v.state.scale, .25); // Logical zoom 9 is native, zoom 7 is quarter.
   [v.state.x, v.state.y] = v.project(123, 0, -456);
   v.state.scale = .25;
   v.selectMap(b);
@@ -116,6 +116,25 @@ test('rotations preserve world-plane center; projection changes fit; initial def
   assert.equal(v.state.x, 0);
   assert.equal(v.state.y, 0);
   assert.notEqual(v.state.scale, .25);
+});
+
+test('production border outliers do not center or zoom the initial camera into empty space', async () => {
+  const production = map({ id: 'Survival-Overworld', view: 'isometric', min_zoom: -20,
+    default_zoom: 7, bounds: [-2330112, -480004096, 33406976, 1225216] });
+  const v = await viewer(root([production]));
+  assert.equal(v.state.x, 0);
+  assert.equal(v.state.y, 0);
+  assert.equal(v.state.scale, .25);
+  const legacy = '?map=Survival-Overworld&rotation=0&x=15538432&y=-239389440&scale=0.0001220703';
+  const recovered = await viewer(root([production]), undefined, legacy);
+  assert.equal(recovered.state.x, 0);
+  assert.equal(recovered.state.y, 0);
+  assert.equal(recovered.state.scale, .25);
+  const shared = await viewer(root([production]), undefined,
+    '?map=Survival-Overworld&rotation=0&x=1234&y=-3456&scale=.5');
+  assert.equal(shared.state.x, 1234);
+  assert.equal(shared.state.y, -3456);
+  assert.equal(shared.state.scale, .5);
 });
 
 test('404 live feed retries after 60 seconds and numeric player dimensions use world', async () => {

@@ -113,6 +113,11 @@ in {
       example = [ "minecraft" ];
       description = "Groups granting read access to worlds, textures, and player data. The service never changes their ownership.";
     };
+    rotationIconsDirectory = mkOption {
+      type = types.nullOr (types.strMatching "/[A-Za-z0-9_./-]+");
+      default = null;
+      description = "Optional external legacy rotation PNG directory (tl, tr, br, bl and their -iso variants). Assets are not bundled or relicensed.";
+    };
     memoryMax = mkOption {
       type = types.str;
       default = "3G";
@@ -168,6 +173,9 @@ in {
 
   config = mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
+    systemd.tmpfiles.rules = lib.optionals (cfg.rotationIconsDirectory != null)
+      (map (name: "C ${output}/icons/${name}.png 0644 voxelatlas voxelatlas - ${cfg.rotationIconsDirectory}/${name}.png")
+        [ "tl" "tr" "br" "bl" "tl-iso" "tr-iso" "br-iso" "bl-iso" ]);
     assertions = [
       { assertion = cfg.settings.maps != [ ]; message = "services.voxelatlas.settings.maps must contain at least one map."; }
       { assertion = lib.hasPrefix "/" cfg.settings.textures && lib.all (world: lib.hasPrefix "/" world.path) (lib.attrValues cfg.settings.worlds); message = "VoxelAtlas textures and world paths must be absolute."; }

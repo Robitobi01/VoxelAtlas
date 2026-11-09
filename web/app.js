@@ -3,19 +3,16 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const canvas = $('map'), ctx = canvas.getContext('2d');
-  const state = { manifest: null, map: null, x: 0, y: 0, scale: 1, width: 1, height: 1,
-    players: [], chunks: [], playersUpdated: 0, chunksUpdated: 0, showPlayers: true, showChunks: false };
+  const state = { manifest: null, map: null, x: 0, y: 0, scale: 1, width: 1, height: 1 };
   const cache = new Map(), pointers = new Map(), indexes = new Map();
   const MAX_IMAGE_BYTES = 64 * 1024 * 1024, MAX_IMAGES = 512, MAX_PENDING = 8;
   let imageBytes = 0;
   let protectedImages = new Set(), protectedIndexes = new Set();
-  let chunkBuckets = new Map();
-  const stats = { lod: 0, visibleTiles: 0, chunkCandidates: 0 };
   const MAX_INDEXES = 128, MAX_INDEX_PENDING = 4;
   let indexPending = 0, wantedIndexes = [];
-  let pending = 0, wanted = [], frame = 0, urlTimer, toastTimer, manifestBusy = false;
+  let pending = 0, wanted = [], frame = 0, urlTimer, manifestBusy = false;
   let initialState = true, currentGeneration = '', pointerPosition = null;
-  const live = { players: { disabled: false, busy: false, retryAt: 0 }, chunks: { disabled: false, busy: false, retryAt: 0 } };
+  let coordinates = { x: 0, z: 0, region: '' }, copyTimer;
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
   const finite = v => typeof v === 'number' && Number.isFinite(v);
   const record = v => v && typeof v === 'object' && !Array.isArray(v);
@@ -85,12 +82,8 @@
         initialState = false;
         $('message').hidden = true;
       }
-      $('connection').textContent = 'Snapshot up to date';
-      $('connection').classList.add('online');
       requestDraw();
     } catch (error) {
-      $('connection').textContent = 'Snapshot unavailable';
-      $('connection').classList.remove('online');
       if (!state.map) message('Waiting for a world', 'Could not load current.json. Check that a render has been published, then try again.', true);
     } finally { manifestBusy = false; }
   }
@@ -98,10 +91,13 @@
   function populateMaps() {
     const select = $('map-select');
     select.replaceChildren();
+    const seen = new Set();
     for (const [index, map] of state.manifest.maps.entries()) {
+      if (seen.has(map.id)) continue;
+      seen.add(map.id);
       const option = document.createElement('option');
       option.value = String(index);
-      option.textContent = `${map.id} · ${map.rotation * 90}°`;
+      option.textContent = map.id;
       select.append(option);
     }
     select.disabled = !state.manifest.maps.length;
@@ -114,22 +110,25 @@
     const sameProjection = previous && previous.world === map.world && previous.view === map.view;
     const center = sameProjection ? unproject(state.x, state.y, previous) : null;
     state.map = map;
-    $('map-select').value = String(state.manifest.maps.indexOf(map));
-    const rotations = state.manifest.maps.filter(m => m.world === map.world && m.view === map.view && m.mode === map.mode);
-    const select = $('rotation-select');
-    select.replaceChildren();
+    $('map-select').value = String(state.manifest.maps.findIndex(m => m.id === map.id));
+    const rotations = state.manifest.maps.filter(m => m.id === map.id);
+    const controls = $('rotation-controls');
+    controls.replaceChildren();
     for (const candidate of rotations) {
-      const option = document.createElement('option');
-      option.value = String(state.manifest.maps.indexOf(candidate));
-      option.textContent = `${candidate.rotation * 90}°`;
-      select.append(option);
+      const names = ['tl', 'tr', 'br', 'bl'];
+      const label = ['Top left', 'Top right', 'Bottom right', 'Bottom left'][candidate.rotation];
+      const button = document.createElement('button');
+      button.type = 'button'; button.title = label;
+      button.setAttribute('aria-label', label);
+      button.setAttribute('aria-pressed', String(candidate.rotation === map.rotation));
+      const image = document.createElement('img');
+      image.src = `icons/${names[candidate.rotation]}${map.view === 'isometric' ? '-iso' : ''}.png`;
+      image.alt = '';
+      image.onerror = () => { button.textContent = label; };
+      button.append(image);
+      button.addEventListener('click', () => { selectMap(candidate); changed(); });
+      controls.append(button);
     }
-    select.value = String(state.manifest.maps.indexOf(map));
-    select.disabled = rotations.length < 2;
-    $('map-description').textContent = `${map.world} · ${map.view === 'topdown' ? 'Top-down' : 'Isometric'} · ${map.mode === 'daylight' ? 'Daylight' : 'Plain'}`;
-    $('height-note').hidden = map.view !== 'isometric';
-    $('chunks-toggle').disabled = map.view !== 'topdown';
-    updateLiveLabels();
     if (fit && !sameProjection) {
       if (Number.isInteger(map.default_zoom) && map.default_zoom >= 0) {
         // Match the configured origin view. Global bounds can include distant
@@ -226,7 +225,7 @@
         else finish('ready');
       };
       image.onerror = () => finish('error');
-      image.src = hash.startsWith('head:') ? hash.slice(5) : `tiles/${encodeURIComponent(hash)}.webp`;
+      image.src = `tiles/${encodeURIComponent(hash)}.webp`;
       evict();
     }
   }
@@ -319,7 +318,6 @@
     if (!state.map) { pumpIndexes(); pumpImages(); evict(); return; }
     const map = state.map;
     const zoomLevel = levelForScale(state.scale, dpr);
-    stats.lod = zoomLevel;
     const size = state.manifest.tile_size * 2 ** -zoomLevel;
     const [left, top] = screenToWorld(0, 0), [right, bottom] = screenToWorld(state.width, state.height);
     const minX = Math.floor(left / size), maxX = Math.floor(right / size);
@@ -334,7 +332,6 @@
     // Shards follow the same deterministic center-first traversal as images.
     wantedIndexes = [];
     for (const tile of tiles) tile.hash = tileHash(zoomLevel, tile.x, tile.y, true);
-    stats.visibleTiles = tiles.length;
     // Interpolate only when shrinking actual device pixels, not merely CSS
     // pixels. High-DPI native-detail zoom must not blur pixel-art textures.
     ctx.imageSmoothingEnabled = 2 ** -zoomLevel * state.scale * dpr < 1;
@@ -347,19 +344,11 @@
       }
     }
     pumpIndexes();
-    if (state.showChunks && map.view === 'topdown') drawChunks();
-    if (state.showPlayers) drawPlayers();
     pumpImages();
     evict();
     updateHUD();
   }
 
-  function matchesWorld(entry) {
-    if (typeof entry.world === 'string') return entry.world === state.map.world;
-    // Deliberately narrow legacy fallback: never leak survival players into creative maps.
-    const legacy = { overworld: 'survival_ow', nether: 'survival_nether', end: 'survival_end' };
-    return legacy[entry.dimension] === state.map.id;
-  }
   function project(x, y, z) {
     if (state.map.view === 'topdown') return [x * 16, z * 16];
     const rotations = [[x, z], [-z, x], [-x, -z], [z, -x]];
@@ -371,124 +360,28 @@
     const rx = x / 32 - y / 16, rz = x / 32 + y / 16;
     return [[rx, rz], [rz, -rx], [-rx, -rz], [-rz, rx]][map.rotation];
   }
-  function headURL(value) {
-    if (typeof value !== 'string' || !value || value.startsWith('//') || /[\\\u0000-\u0020]/.test(value)) return null;
-    try {
-      const url = new URL(value, location.href);
-      return url.origin === location.origin && ['http:', 'https:'].includes(url.protocol) ? url.href : null;
-    } catch { return null; }
-  }
-  function drawPlayers() {
-    ctx.save();
-    ctx.globalAlpha = Date.now() / 1000 - state.playersUpdated > 120 ? .45 : 1;
-    for (const player of state.players) {
-      if (!matchesWorld(player)) continue;
-      const [px, py] = project(player.x, player.y, player.z), [x, y] = worldToScreen(px, py);
-      if (x < -100 || y < -30 || x > state.width + 100 || y > state.height + 30) continue;
-      ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2);
-      ctx.fillStyle = '#a1e5b2'; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = '#16271b'; ctx.stroke();
-      const head = headURL(player.head);
-      if (head) {
-        const key = `head:${head}`, item = touchCache(key);
-        if (item?.status === 'ready') ctx.drawImage(item.image, x - 8, y - 8, 16, 16);
-        else if (!item || item.status === 'loading') wanted.push(key);
-        protectedImages.add(key);
-      }
-      ctx.font = '600 11px system-ui, sans-serif'; ctx.textAlign = 'center';
-      const name = player.name.slice(0, 48), width = ctx.measureText(name).width;
-      ctx.fillStyle = '#101a15e8'; ctx.fillRect(x - width / 2 - 7, y - 32, width + 14, 20);
-      ctx.fillStyle = '#e8f7ec'; ctx.fillText(name, x, y - 18);
-    }
-    ctx.restore();
-  }
-  function indexChunks() {
-    chunkBuckets = new Map();
-    for (const chunk of state.chunks) {
-      let world = chunkBuckets.get(chunk.world);
-      if (!world) chunkBuckets.set(chunk.world, world = new Map());
-      const key = `${Math.floor(chunk.x / 32)}/${Math.floor(chunk.z / 32)}`;
-      let bucket = world.get(key);
-      if (!bucket) world.set(key, bucket = []);
-      bucket.push(chunk);
-    }
-  }
-  function visibleChunks() {
-    if (!chunkBuckets) indexChunks();
-    const world = chunkBuckets.get(state.map.world);
-    if (!world) return [];
-    const [left, top] = screenToWorld(0, 0), [right, bottom] = screenToWorld(state.width, state.height);
-    const minX = Math.floor(left / 8192), maxX = Math.floor(right / 8192);
-    const minY = Math.floor(top / 8192), maxY = Math.floor(bottom / 8192);
-    const buckets = [];
-    if ((maxX - minX + 1) * (maxY - minY + 1) < world.size) {
-      for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
-        const bucket = world.get(`${x}/${y}`);
-        if (bucket) buckets.push(bucket);
-      }
-    } else {
-      for (const [key, bucket] of world) {
-        const [x, y] = key.split('/').map(Number);
-        if (x >= minX && x <= maxX && y >= minY && y <= maxY) buckets.push(bucket);
-      }
-    }
-    return buckets;
-  }
-  function drawChunks() {
-    ctx.save();
-    ctx.globalAlpha = Date.now() / 1000 - state.chunksUpdated > 120 ? .3 : 1;
-    stats.chunkCandidates = 0;
-    for (const bucket of visibleChunks()) for (const chunk of bucket) {
-      stats.chunkCandidates++;
-      const [x, y] = worldToScreen(chunk.x * 256, chunk.z * 256), size = 256 * state.scale;
-      if (x + size < 0 || y + size < 0 || x > state.width || y > state.height) continue;
-      const color = ['#74c4fc', '#f2c66d', '#a1e5b2'][chunk.type];
-      if (!color) continue;
-      ctx.fillStyle = color + '26';
-      ctx.strokeStyle = color + '88';
-      ctx.lineWidth = 1; ctx.fillRect(x, y, size, size); ctx.strokeRect(x, y, size, size);
-    }
-    ctx.restore();
-  }
   function updateHUD() {
     const [sx, sy] = pointerPosition || [state.width / 2, state.height / 2];
     const [wx, wy] = screenToWorld(sx, sy);
-    const [x, z] = unproject(wx, wy);
-    $('coordinates').textContent = `X ${(Math.floor(x) || 0).toLocaleString()}   Z ${(Math.floor(z) || 0).toLocaleString()}`;
-    const desired = 64 / (16 * state.scale), power = 10 ** Math.floor(Math.log10(desired));
-    const blocks = [1, 2, 5, 10].map(n => n * power).find(n => n >= desired);
-    $('scale-bar').style.width = `${blocks * 16 * state.scale}px`;
-    $('scale-label').textContent = `${Number(blocks.toPrecision(3)).toLocaleString()} blocks${state.map.view === 'isometric' ? ' (X+Z)' : ''}`;
-    $('zoom-label').textContent = `${Math.round(state.scale * 100)}%`;
+    const [x, z] = unproject(wx, wy + (state.map.view === 'isometric' ? 64 * 16 : 0));
+    coordinates = { x: Math.round(x) || 0, z: Math.round(z) || 0,
+      region: `r.${Math.floor(x / 512)}.${Math.floor(z / 512)}.mca` };
+    $('coordinate-x').textContent = `X: ${coordinates.x}`;
+    $('coordinate-z').textContent = `Z: ${coordinates.z}`;
+    $('coordinate-region').textContent = coordinates.region;
   }
 
-  function updateLiveLabels() {
-    $('chunk-legend').hidden = !state.showChunks || state.map?.view !== 'topdown';
-    const count = state.map ? state.players.filter(matchesWorld).length : 0;
-    $('players-count').textContent = live.players.disabled ? 'No live feed' : state.playersUpdated ? `${count} in this world${Date.now() / 1000 - state.playersUpdated > 120 ? ' · stale' : ''}` : 'Waiting for live data';
-    $('chunks-status').textContent = state.map?.view === 'isometric' ? 'Top-down maps only' : live.chunks.disabled ? 'No live feed' : state.chunksUpdated ? `${state.chunks.length} chunks${Date.now() / 1000 - state.chunksUpdated > 120 ? ' · stale' : ''}` : 'Optional overlay';
+  async function copyCoordinate(value) {
+    try { await navigator.clipboard.writeText(value); }
+    catch {
+      const input = document.createElement('textarea');
+      input.value = value; input.style.position = 'fixed'; input.style.opacity = '0';
+      document.body.append(input); input.select(); document.execCommand('copy'); input.remove();
+    }
+    $('copy-feedback').textContent = `Copied: ${value}`;
+    $('copy-feedback').hidden = false;
+    clearTimeout(copyTimer); copyTimer = setTimeout(() => { $('copy-feedback').hidden = true; }, 1000);
   }
-  async function refreshLive(kind) {
-    const feed = live[kind];
-    if (feed.busy || Date.now() < feed.retryAt) return;
-    feed.busy = true;
-    try {
-      const response = await fetch(`live/${kind}.json`, { cache: 'no-cache' });
-      if (response.status === 404 || response.status === 410) { feed.disabled = true; feed.retryAt = Date.now() + 60000; return; }
-      if (!response.ok) return;
-      const data = await response.json();
-      if (!finite(data.updated_at) || !Array.isArray(data[kind])) return;
-      state[kind] = data[kind].filter(entry => entry && (kind === 'players'
-        ? typeof entry.name === 'string' && [entry.x, entry.y, entry.z].every(finite)
-        : typeof entry.world === 'string' && Number.isInteger(entry.x) && Number.isInteger(entry.z) &&
-          Number.isInteger(entry.type) && entry.type >= 0 && entry.type <= 2)).slice(0, kind === 'players' ? 2000 : 1000000);
-      if (kind === 'chunks') chunkBuckets = null;
-      state[`${kind}Updated`] = data.updated_at;
-      feed.disabled = false; feed.retryAt = 0;
-      requestDraw();
-    } catch { /* Live metadata is optional; the static map remains usable. */ }
-    finally { feed.busy = false; updateLiveLabels(); }
-  }
-
   function resize() {
     state.width = canvas.clientWidth; state.height = canvas.clientHeight;
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
@@ -523,18 +416,20 @@
   });
   const release = event => { pointers.delete(event.pointerId); if (!pointers.size) canvas.classList.remove('dragging'); };
   canvas.addEventListener('pointerup', release); canvas.addEventListener('pointercancel', release); canvas.addEventListener('lostpointercapture', release);
-  canvas.addEventListener('pointerleave', () => { pointerPosition = null; if (state.map) updateHUD(); });
   canvas.addEventListener('wheel', event => {
     event.preventDefault();
     const p = pointer(event), delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? state.height : 1);
     zoom(Math.exp(-clamp(delta, -200, 200) * .003), p.x, p.y);
   }, { passive: false });
   canvas.addEventListener('dblclick', event => { const p = pointer(event); zoom(event.shiftKey ? .5 : 2, p.x, p.y); });
+  canvas.addEventListener('contextmenu', event => {
+    event.preventDefault(); const p = pointer(event); pointerPosition = [p.x, p.y];
+    if (state.map) { updateHUD(); copyCoordinate(`${coordinates.x} 100 ${coordinates.z}`); }
+  });
   canvas.addEventListener('keydown', event => {
-    if (['+', '=', '-', '_', 'Home', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) event.preventDefault();
+    if (['+', '=', '-', '_', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) event.preventDefault();
     if (event.key === '+' || event.key === '=') zoom(2);
     else if (event.key === '-' || event.key === '_') zoom(.5);
-    else if (event.key === 'Home') fitMap();
     else if (event.key.startsWith('Arrow')) {
       const amount = (event.shiftKey ? 200 : 60) / state.scale;
       if (event.key === 'ArrowLeft') state.x -= amount;
@@ -544,32 +439,19 @@
       changed();
     }
   });
-  $('map-select').addEventListener('change', event => { selectMap(state.manifest.maps[Number(event.target.value)]); changed(); });
-  $('rotation-select').addEventListener('change', event => { selectMap(state.manifest.maps[Number(event.target.value)]); changed(); });
+  $('map-select').addEventListener('change', event => {
+    const selected = state.manifest.maps[Number(event.target.value)];
+    const rotated = state.map?.world === selected.world && state.manifest.maps.find(m => m.id === selected.id && m.rotation === state.map.rotation);
+    selectMap(rotated || selected); changed();
+  });
   $('zoom-in').addEventListener('click', () => zoom(2));
   $('zoom-out').addEventListener('click', () => zoom(.5));
-  $('fit').addEventListener('click', fitMap);
   $('retry').addEventListener('click', refreshManifest);
-  for (const kind of ['players', 'chunks']) {
-    $(kind + '-toggle').addEventListener('click', () => {
-      const key = kind === 'players' ? 'showPlayers' : 'showChunks';
-      state[key] = !state[key]; $(kind + '-toggle').setAttribute('aria-pressed', String(state[key]));
-      updateLiveLabels();
-      if (state[key]) refreshLive(kind);
-      requestDraw();
-    });
-  }
-  $('share').addEventListener('click', async () => {
-    saveURL();
-    let text = 'Link copied. Share this exact view.';
-    try { await navigator.clipboard.writeText(location.href); }
-    catch { text = 'This view is saved in the address bar. Copy its URL to share.'; }
-    $('toast').textContent = text; $('toast').hidden = false;
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('toast').hidden = true; }, 3500);
-  });
+  $('coordinate-x').addEventListener('click', () => copyCoordinate(String(coordinates.x)));
+  $('coordinate-z').addEventListener('click', () => copyCoordinate(String(coordinates.z)));
+  $('coordinate-region').addEventListener('click', () => copyCoordinate(coordinates.region));
   window.addEventListener('resize', resize);
-  resize(); refreshManifest(); refreshLive('players'); refreshLive('chunks');
+  resize(); refreshManifest();
   setInterval(() => { if (!document.hidden) refreshManifest(); }, 30000);
-  setInterval(() => { if (!document.hidden) { refreshLive('players'); if (state.showChunks) refreshLive('chunks'); } }, 10000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { resize(); refreshManifest(); refreshLive('players'); if (state.showChunks) refreshLive('chunks'); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { resize(); refreshManifest(); } });
 })();

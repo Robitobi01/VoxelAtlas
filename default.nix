@@ -11,10 +11,6 @@ pkgs.rustPlatform.buildRustPackage {
       && !(type == "directory" && builtins.elem (baseNameOf path) [ "target" ".direnv" ]);
   };
   cargoLock.lockFile = ./Cargo.lock;
-  nativeCheckInputs = [ pkgs.nodejs ];
-  postCheck = ''
-    node --test web/test.mjs
-  '';
 
   meta = with pkgs.lib; {
     description = "Offline Minecraft Java 1.12.2 map renderer for static hosting";

@@ -7,7 +7,7 @@ server required.
 ## Run
 
 ```sh
-nix-build
+nix-build package.nix  # or: cargo build --release
 cp examples/minimal.toml render.toml
 # Set world and texture paths in render.toml.
 ./result/bin/voxelatlas validate --config render.toml
@@ -25,22 +25,12 @@ Encoding: `fast` (default, exact), `compact` (exact, more CPU), or `indexed`
 strict mode is the default. Changing inputs and I/O errors still stop publication.
 Old tiles are retained until `voxelatlas gc --config render.toml`.
 
-## NixOS
+## Nix
 
-Import `source + "/nix/module.nix"` from a revision-and-hash-pinned
-`builtins.fetchTarball` or `pkgs.fetchFromGitHub`; adapt
-[examples/production.nix](examples/production.nix) for services, timers, and nginx.
-Use snapshots for world paths and grant the service read access. Set `workers`,
-`memoryMax`, and optionally `cpuQuota` explicitly; low priority is not isolation.
-Defaults: 3 GiB shared hard limit, 2.5 GiB pressure threshold, no swap, Nice 19, CPU/IO weight 1,
-and idle I/O scheduling. The 128 MiB decoded-chunk cache is not a total RAM limit.
-The package and module use your host's nixpkgs; no flakes or second nixpkgs import.
-Keep production settings and external assets outside this repository.
-
-```sh
-sudo systemctl start voxelatlas-render
-journalctl -fu voxelatlas-render
-```
+`package.nix` builds the renderer with the host's nixpkgs (`pkgs.callPackage ./package.nix { }`);
+`nix-shell` gives a Rust development shell. Services, timers and nginx belong to the deployment
+(scheduled `voxelatlas render`, read-only world snapshots, static hosting of the output directory).
+Use stable snapshots as world paths. Low priority is not isolation: limit workers, memory and CPU.
 
 **Preview:** complex models, lighting, and tile-entity appearances remain
 incomplete. No legacy URL translation or MySQL identity importer. Optional player

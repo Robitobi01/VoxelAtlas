@@ -13,6 +13,9 @@
   let pending = 0, wanted = [], frame = 0, urlTimer, manifestBusy = false;
   let initialState = true, currentGeneration = '', pointerPosition = null;
   let coordinates = { x: 0, z: 0, region: '' }, copyTimer;
+  // Optional live chunk overlay: live-chunks.json maps world keys to a server-sent event stream
+  // ("chunks" events: {dimensions: [{id, chunks: [[x,z]...], lazyChunks: [[x,z]...]}]}).
+  const live = { config: null, world: '', source: null, loaded: [], lazy: [], time: 0, show: true };
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
   const finite = v => typeof v === 'number' && Number.isFinite(v);
   const record = v => v && typeof v === 'object' && !Array.isArray(v);
@@ -88,6 +91,75 @@
     } finally { manifestBusy = false; }
   }
 
+  async function loadLiveConfig() {
+    try {
+      const response = await fetch('live-chunks.json', { cache: 'no-cache' });
+      if (!response.ok) return;
+      const config = await response.json();
+      if (!record(config)) return;
+      live.config = Object.create(null);
+      for (const [world, entry] of Object.entries(config)) {
+        if (record(entry) && typeof entry.url === 'string' && Number.isInteger(entry.dimension)) live.config[world] = entry;
+      }
+      subscribeLive();
+    } catch { /* no overlay */ }
+  }
+
+  // One stream for the selected world; switching worlds switches the stream.
+  function subscribeLive() {
+    const entry = live.config && state.map && live.config[state.map.world];
+    const world = entry ? state.map.world : '';
+    $('live-toggle').hidden = !entry;
+    if (world === live.world) return;
+    if (live.source) live.source.close();
+    Object.assign(live, { world, source: null, loaded: [], lazy: [], time: 0 });
+    updateLiveLabel();
+    if (!entry) return;
+    live.source = new EventSource(entry.url);
+    live.source.addEventListener('chunks', event => {
+      try {
+        const data = JSON.parse(event.data);
+        const dimension = (data.dimensions || []).find(d => d.id === entry.dimension);
+        const coords = list => Array.isArray(list) ? list.filter(c => Array.isArray(c) && finite(c[0]) && finite(c[1])) : [];
+        const lazy = coords(dimension?.lazyChunks);
+        const lazyKeys = new Set(lazy.map(c => c[0] + ',' + c[1]));
+        live.loaded = coords(dimension?.chunks).filter(c => !lazyKeys.has(c[0] + ',' + c[1]));
+        live.lazy = lazy;
+        live.time = Date.now();
+        updateLiveLabel();
+        requestDraw();
+      } catch { /* ignore malformed events */ }
+    });
+  }
+
+  function updateLiveLabel() {
+    const button = $('live-toggle');
+    button.setAttribute('aria-pressed', String(live.show));
+    button.textContent = live.time ? `Chunks ${live.loaded.length + live.lazy.length} (${live.lazy.length} lazy)` : 'Chunks';
+  }
+
+  // Loaded chunks (entities processed) green, lazy chunks orange; on the y=64 plane like the HUD.
+  function drawLiveChunks() {
+    if (!live.show || !live.world || live.world !== state.map.world) return;
+    const y = state.map.view === 'isometric' ? 64 : 0;
+    const draw = (chunks, fill, stroke) => {
+      if (!chunks.length) return;
+      const path = new Path2D();
+      for (const [cx, cz] of chunks) {
+        const corners = [[0, 0], [16, 0], [16, 16], [0, 16]].map(([dx, dz]) => worldToScreen(...project(cx * 16 + dx, y, cz * 16 + dz)));
+        if (corners.every(([sx]) => sx < 0) || corners.every(([sx]) => sx > state.width) ||
+            corners.every(([, sy]) => sy < 0) || corners.every(([, sy]) => sy > state.height)) continue;
+        path.moveTo(...corners[0]);
+        for (const corner of corners.slice(1)) path.lineTo(...corner);
+        path.closePath();
+      }
+      ctx.fillStyle = fill; ctx.fill(path);
+      if (16 * 16 * state.scale > 6) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(path); }
+    };
+    draw(live.loaded, 'rgba(70, 200, 110, .22)', 'rgba(70, 200, 110, .55)');
+    draw(live.lazy, 'rgba(255, 160, 0, .30)', 'rgba(255, 160, 0, .70)');
+  }
+
   function populateMaps() {
     const select = $('map-select');
     select.replaceChildren();
@@ -110,6 +182,7 @@
     const sameProjection = previous && previous.world === map.world && previous.view === map.view;
     const center = sameProjection ? unproject(state.x, state.y, previous) : null;
     state.map = map;
+    subscribeLive();
     $('map-select').value = String(state.manifest.maps.findIndex(m => m.id === map.id));
     const rotations = state.manifest.maps.filter(m => m.id === map.id);
     const controls = $('rotation-controls');
@@ -343,6 +416,7 @@
         if (!item || item.status === 'loading') wanted.push(tile.hash);
       }
     }
+    drawLiveChunks();
     pumpIndexes();
     pumpImages();
     evict();
@@ -444,6 +518,7 @@
     const rotated = state.map?.world === selected.world && state.manifest.maps.find(m => m.id === selected.id && m.rotation === state.map.rotation);
     selectMap(rotated || selected); changed();
   });
+  $('live-toggle').addEventListener('click', () => { live.show = !live.show; updateLiveLabel(); requestDraw(); });
   $('zoom-in').addEventListener('click', () => zoom(2));
   $('zoom-out').addEventListener('click', () => zoom(.5));
   $('retry').addEventListener('click', refreshManifest);
@@ -451,7 +526,7 @@
   $('coordinate-z').addEventListener('click', () => copyCoordinate(String(coordinates.z)));
   $('coordinate-region').addEventListener('click', () => copyCoordinate(coordinates.region));
   window.addEventListener('resize', resize);
-  resize(); refreshManifest();
+  resize(); refreshManifest().then(loadLiveConfig);
   setInterval(() => { if (!document.hidden) refreshManifest(); }, 30000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { resize(); refreshManifest(); } });
 })();

@@ -25,6 +25,19 @@ Encoding: `fast` (default, exact), `compact` (exact, more CPU), or `indexed`
 strict mode is the default. Changing inputs and I/O errors still stop publication.
 Old tiles are retained until `voxelatlas gc --config render.toml`.
 
+## Live chunk overlay
+
+The viewer optionally loads `live-chunks.json` next to `current.json` (served by the deployment,
+not written by the renderer) and shows loaded and lazy chunks of the selected world live:
+
+```json
+{ "survival_ow": { "url": "/mcprobe/survival/watch?chunks", "dimension": 0 } }
+```
+
+`url` is a server-sent event stream with `chunks` events
+(`{"dimensions": [{"id": 0, "chunks": [[x, z], ...], "lazyChunks": [[x, z], ...]}]}`, as published by
+mcprobe); `dimension` selects the entry (0 overworld, -1 nether, 1 end). Without the file there is no overlay.
+
 ## Nix
 
 `package.nix` builds the renderer with the host's nixpkgs (`pkgs.callPackage ./package.nix { }`);

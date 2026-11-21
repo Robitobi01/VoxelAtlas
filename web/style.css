@@ -20,6 +20,7 @@ button:focus-visible, select:focus-visible { outline: 2px solid #555; outline-of
 #rotation-controls button[aria-pressed="true"] { border-color: #999; z-index: 1; }
 #rotation-controls img { display: block; width: 30px; height: 30px; margin: 3px; object-fit: contain; }
 #live-toggle { position: absolute; top: 52px; right: 10px; height: 30px; padding: 4px 10px; border: 1px solid #ccc; border-radius: 4px; }
+#players-toggle { position: absolute; top: 88px; right: 10px; height: 30px; padding: 4px 10px; border: 1px solid #ccc; border-radius: 4px; }
 #coordinates { position: absolute; left: 10px; bottom: 10px; display: flex; }
 #coordinates button { padding: 6px 10px; border: 1px solid #ccc; border-radius: 0; }
 #coordinates button + button { margin-left: -1px; }

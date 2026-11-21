@@ -53,7 +53,10 @@ enum Command {
         #[arg(short, long)]
         config: PathBuf,
         #[arg(long)]
-        players: PathBuf,
+        players: Option<PathBuf>,
+        /// Publish positions without scanning regions for inferred chunk activity.
+        #[arg(long)]
+        players_only: bool,
         /// Optional UUID → {name,head} identity JSON supplied by your identity system.
         #[arg(long)]
         identities: Option<PathBuf>,
@@ -147,7 +150,13 @@ fn run() -> Result<()> {
             config,
             players,
             identities,
-        } => voxelatlas::live::update(&Config::load(&config)?, &players, identities.as_deref())?,
+            players_only,
+        } => voxelatlas::live::update(
+            &Config::load(&config)?,
+            players.as_deref(),
+            identities.as_deref(),
+            players_only,
+        )?,
         Command::Gc {
             config,
             keep,

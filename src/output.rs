@@ -1,13 +1,13 @@
 //! Incremental tiles, immutable content-addressed storage, and atomic publication.
 use crate::{
     assets::Assets,
-    codec::{TileEncoder, read_half},
+    codec::{read_half, TileEncoder},
     config::{Config, Encoding, MapConfig, Mode, View},
     progress::Progress,
     render,
     world::{Fingerprint, RegionFingerprint, World},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use image::RgbaImage;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -17,8 +17,8 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -771,7 +771,7 @@ pub fn render_with_options(config: &Config, force: bool, verify: bool) -> Result
     atomic_write_json(&state_path, &state)?;
     Ok(stats)
 }
-fn install_viewer(output: &Path) -> Result<()> {
+pub(crate) fn install_viewer(output: &Path) -> Result<()> {
     for (name, bytes) in [
         ("index.html", include_bytes!("../web/index.html").as_slice()),
         ("app.js", include_bytes!("../web/app.js").as_slice()),

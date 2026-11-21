@@ -16,6 +16,7 @@
   // Optional live chunk overlay: live-chunks.json maps world keys to a server-sent event stream
   // ("chunks" events: {dimensions: [{id, chunks: [[x,z]...], lazyChunks: [[x,z]...]}]}).
   const live = { config: null, world: '', source: null, loaded: [], lazy: [], time: 0, show: true };
+  const players = { worlds: new Map(), heads: new Map(), show: true, busy: false };
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
   const finite = v => typeof v === 'number' && Number.isFinite(v);
   const record = v => v && typeof v === 'object' && !Array.isArray(v);
@@ -160,6 +161,67 @@
     draw(live.lazy, 'rgba(255, 160, 0, .30)', 'rgba(255, 160, 0, .70)');
   }
 
+  function updatePlayerToggle() {
+    const button = $('players-toggle');
+    button.hidden = !players.worlds.has(state.map?.world);
+    button.setAttribute('aria-pressed', String(players.show));
+  }
+
+  async function refreshPlayers() {
+    if (players.busy) return;
+    players.busy = true;
+    try {
+      const response = await fetch('live/players.json', { cache: 'no-cache' });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (!Array.isArray(data.players)) return;
+      const worlds = new Map(), heads = new Set();
+      for (const p of data.players) {
+        if (!record(p) || typeof p.world !== 'string' || typeof p.name !== 'string' || ![p.x, p.y, p.z].every(finite)) continue;
+        const head = typeof p.head === 'string' && /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)*\.png$/.test(p.head) ? p.head : null;
+        if (!worlds.has(p.world)) worlds.set(p.world, []);
+        worlds.get(p.world).push({ ...p, head });
+        if (head) heads.add(head);
+      }
+      for (const url of players.heads.keys()) if (!heads.has(url)) players.heads.delete(url);
+      players.worlds = worlds;
+      updatePlayerToggle();
+      requestDraw();
+    } catch { /* optional overlay */ }
+    finally { players.busy = false; }
+  }
+
+  function drawPlayers() {
+    if (!players.show) return;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.font = '12px system-ui';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.lineWidth = 3;
+    for (const p of players.worlds.get(state.map.world) || []) {
+      const [x, y] = worldToScreen(...project(p.x, p.y, p.z));
+      if (x < -100 || x > state.width + 100 || y < 0 || y > state.height + 36) continue;
+      let image = players.heads.get(p.head);
+      if (p.head && !image) {
+        image = new Image();
+        image.onload = requestDraw;
+        image.src = p.head;
+        players.heads.set(p.head, image);
+      }
+      if (image?.naturalWidth) {
+        ctx.fillStyle = '#111'; ctx.fillRect(x - 11, y - 22, 22, 22);
+        ctx.drawImage(image, x - 10, y - 21, 20, 20);
+      } else {
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y - 6, 4, 0, Math.PI * 2); ctx.fill();
+      }
+      const label = p.name.slice(0, 36), labelY = y - (image?.naturalWidth ? 24 : 13);
+      ctx.strokeStyle = '#111'; ctx.strokeText(label, x, labelY);
+      ctx.fillStyle = '#fff'; ctx.fillText(label, x, labelY);
+    }
+    ctx.restore();
+  }
+
   function populateMaps() {
     const select = $('map-select');
     select.replaceChildren();
@@ -183,6 +245,7 @@
     const center = sameProjection ? unproject(state.x, state.y, previous) : null;
     state.map = map;
     subscribeLive();
+    updatePlayerToggle();
     $('map-select').value = String(state.manifest.maps.findIndex(m => m.id === map.id));
     const rotations = state.manifest.maps.filter(m => m.id === map.id);
     const controls = $('rotation-controls');
@@ -417,6 +480,7 @@
       }
     }
     drawLiveChunks();
+    drawPlayers();
     pumpIndexes();
     pumpImages();
     evict();
@@ -519,6 +583,7 @@
     selectMap(rotated || selected); changed();
   });
   $('live-toggle').addEventListener('click', () => { live.show = !live.show; updateLiveLabel(); requestDraw(); });
+  $('players-toggle').addEventListener('click', () => { players.show = !players.show; updatePlayerToggle(); requestDraw(); });
   $('zoom-in').addEventListener('click', () => zoom(2));
   $('zoom-out').addEventListener('click', () => zoom(.5));
   $('retry').addEventListener('click', refreshManifest);
@@ -526,7 +591,7 @@
   $('coordinate-z').addEventListener('click', () => copyCoordinate(String(coordinates.z)));
   $('coordinate-region').addEventListener('click', () => copyCoordinate(coordinates.region));
   window.addEventListener('resize', resize);
-  resize(); refreshManifest().then(loadLiveConfig);
-  setInterval(() => { if (!document.hidden) refreshManifest(); }, 30000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { resize(); refreshManifest(); } });
+  resize(); refreshManifest().then(loadLiveConfig); refreshPlayers();
+  setInterval(() => { if (!document.hidden) { refreshManifest(); refreshPlayers(); } }, 30000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { resize(); refreshManifest(); refreshPlayers(); } });
 })();

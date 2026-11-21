@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -69,6 +69,8 @@ fn default_zoom() -> u8 {
 #[serde(deny_unknown_fields)]
 pub struct WorldConfig {
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub player_data: Option<PathBuf>,
     #[serde(default)]
     pub dimension: Dimension,
     #[serde(default)]

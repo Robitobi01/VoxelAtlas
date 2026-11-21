@@ -1,6 +1,6 @@
 //! Synthetic 1.12.2 worlds exercise the public publication pipeline, not assets internals.
-use fastnbt::{ByteArray, nbt};
-use flate2::{Compression, write::ZlibEncoder};
+use fastnbt::{nbt, ByteArray};
+use flate2::{write::ZlibEncoder, Compression};
 use image::{Rgba, RgbaImage};
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -51,6 +51,7 @@ impl Fixture {
             worlds: BTreeMap::from([(
                 "world".into(),
                 WorldConfig {
+                    player_data: None,
                     path: world,
                     dimension: Dimension::Overworld,
                     exclude: vec![],
@@ -178,11 +179,9 @@ fn tiles(output: &Path) -> TileSet {
                 );
                 let bytes = fs::read(output.join("tiles").join(format!("{hash}.webp"))).unwrap();
                 assert_eq!(blake3::hash(&bytes).to_hex().as_str(), hash);
-                assert!(
-                    result
-                        .insert((map.id.clone(), map.rotation, key), hash)
-                        .is_none()
-                );
+                assert!(result
+                    .insert((map.id.clone(), map.rotation, key), hash)
+                    .is_none());
             }
         }
     }
@@ -352,11 +351,9 @@ fn negative_coordinates_growth_zoom_transitions_and_deletion() {
     fixture.world(&[]);
     output::render(&fixture.config, false).unwrap();
     assert!(tiles(&fixture.config.output).is_empty());
-    assert!(
-        manifest(&fixture.config.output).maps[0]
-            .tile_indexes
-            .is_empty()
-    );
+    assert!(manifest(&fixture.config.output).maps[0]
+        .tile_indexes
+        .is_empty());
     let empty = fixture.full_config("empty-full");
     output::render(&empty, true).unwrap();
     assert_eq!(decoded(&fixture.config.output), decoded(&empty.output));
@@ -466,33 +463,27 @@ fn gc_keeps_current_and_grace_period_indexes_and_tiles() {
     output::render(&fixture.config, false).unwrap();
     let current = fs::read(fixture.config.output.join("current.json")).unwrap();
     assert_eq!(output::gc(&fixture.config.output, 1, 3600).unwrap(), 0);
-    assert!(
-        fixture
+    assert!(fixture
+        .config
+        .output
+        .join("generations")
+        .join(format!("{}.json", old.generation))
+        .exists());
+    for hash in old.maps.iter().flat_map(|m| m.tile_indexes.values()) {
+        assert!(fixture
             .config
             .output
-            .join("generations")
-            .join(format!("{}.json", old.generation))
-            .exists()
-    );
-    for hash in old.maps.iter().flat_map(|m| m.tile_indexes.values()) {
-        assert!(
-            fixture
-                .config
-                .output
-                .join("indexes")
-                .join(format!("{hash}.json"))
-                .exists()
-        );
+            .join("indexes")
+            .join(format!("{hash}.json"))
+            .exists());
     }
     for hash in old_tiles.values() {
-        assert!(
-            fixture
-                .config
-                .output
-                .join("tiles")
-                .join(format!("{hash}.webp"))
-                .exists()
-        );
+        assert!(fixture
+            .config
+            .output
+            .join("tiles")
+            .join(format!("{hash}.webp"))
+            .exists());
     }
     // Unreferenced immutable objects are collected without relying on mtime order.
     let orphan_hash = "0".repeat(64);

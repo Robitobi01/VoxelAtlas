@@ -9,7 +9,7 @@ use crate::{
     output::atomic_write,
     world::World,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -88,7 +88,12 @@ struct State {
 
 /// Publish independent, atomic player/activity snapshots and a durable checkpoint.
 /// A separate kernel lock allows this to run concurrently with rendering.
-pub fn update(config: &Config, players: &Path, identities: Option<&Path>) -> Result<()> {
+pub fn update(
+    config: &Config,
+    players: Option<&Path>,
+    identities: Option<&Path>,
+    players_only: bool,
+) -> Result<()> {
     let state_dir = config.output.join(".state");
     fs::create_dir_all(&state_dir)?;
     let lock = fs::OpenOptions::new()
@@ -100,9 +105,13 @@ pub fn update(config: &Config, players: &Path, identities: Option<&Path>) -> Res
     lock.try_lock()
         .context("another live updater is running for this output")?;
     let root = players
-        .parent()
-        .context("playerdata must have a world root parent")?
-        .canonicalize()?;
+        .map(|path| -> Result<_> {
+            Ok(path
+                .parent()
+                .context("playerdata must have a world root parent")?
+                .canonicalize()?)
+        })
+        .transpose()?;
     let identities: BTreeMap<String, Identity> = match identities {
         Some(path) => match read_json(path) {
             Ok(value) => value,
@@ -113,98 +122,123 @@ pub fn update(config: &Config, players: &Path, identities: Option<&Path>) -> Res
         },
         None => BTreeMap::new(),
     };
-    let mut selected = BTreeMap::new();
+    let mut sources = BTreeMap::<&Path, BTreeMap<i32, String>>::new();
     for (id, world) in &config.worlds {
-        if world.path.canonicalize().ok().as_ref() == Some(&root) {
+        let source = match players {
+            Some(path) if world.path.canonicalize().ok() == root => Some(path),
+            Some(_) => None,
+            None => world.player_data.as_deref(),
+        };
+        if let Some(source) = source {
             let dimension = match world.dimension {
                 Dimension::Overworld => 0,
                 Dimension::Nether => -1,
                 Dimension::End => 1,
             };
             // Aliases are deterministic: first configured ID owns player markers.
-            selected.entry(dimension).or_insert(id.clone());
+            sources
+                .entry(source)
+                .or_default()
+                .entry(dimension)
+                .or_insert(id.clone());
         }
     }
-    ensure!(
-        !selected.is_empty(),
-        "no configured world owns {}",
-        players.display()
-    );
+    ensure!(!sources.is_empty(), "no configured player data sources");
     let mut markers = Vec::new();
     let mut player_centers = BTreeMap::<String, Vec<Position>>::new();
-    for entry in fs::read_dir(players).with_context(|| format!("reading {}", players.display()))? {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                tracing::warn!("player entry: {error}");
+    for (players, selected) in sources {
+        let root = players
+            .parent()
+            .context("playerdata must have a world root parent")?;
+        for entry in
+            fs::read_dir(players).with_context(|| format!("reading {}", players.display()))?
+        {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!("player entry: {error}");
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if path.extension().is_none_or(|s| s != "dat") {
                 continue;
             }
-        };
-        let path = entry.path();
-        if path.extension().is_none_or(|s| s != "dat") {
-            continue;
-        }
-        let Some(uuid) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .filter(|s| valid_uuid(s))
-        else {
-            continue;
-        };
-        let result = (|| -> Result<Option<Player>> {
-            let before = stamp(&path)?;
-            let data = parse_player(fs::File::open(&path)?)?;
-            ensure!(
-                stamp(&path)? == before,
-                "player changed during read; retry next update"
-            );
-            let Some(world) = selected.get(&data.dimension) else {
-                return Ok(None);
+            let Some(uuid) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| valid_uuid(s))
+            else {
+                continue;
             };
-            // Activity is based on recently saved players, including newcomers;
-            // historical markers and their playtime filter are independent.
-            if crate::output::unix_time().saturating_sub(before.seconds) <= 90 {
-                player_centers
-                    .entry(world.clone())
-                    .or_default()
-                    .push((chunk_coordinate(data.pos[0]), chunk_coordinate(data.pos[2])));
+            let result = (|| -> Result<Option<Player>> {
+                let before = stamp(&path)?;
+                let data = parse_player(fs::File::open(&path)?)?;
+                ensure!(
+                    stamp(&path)? == before,
+                    "player changed during read; retry next update"
+                );
+                let Some(world) = selected.get(&data.dimension) else {
+                    return Ok(None);
+                };
+                // Activity is based on recently saved players, including newcomers;
+                // historical markers and their playtime filter are independent.
+                if !players_only && crate::output::unix_time().saturating_sub(before.seconds) <= 90
+                {
+                    player_centers
+                        .entry(world.clone())
+                        .or_default()
+                        .push((chunk_coordinate(data.pos[0]), chunk_coordinate(data.pos[2])));
+                }
+                let stats: BTreeMap<String, serde_json::Value> =
+                    read_json(&root.join("stats").join(format!("{uuid}.json")))?;
+                if stats
+                    .get("stat.playOneMinute")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    <= MIN_PLAY_TICKS
+                {
+                    return Ok(None);
+                }
+                let identity = identities.get(uuid);
+                let name = identity
+                    .filter(|i| !i.name.is_empty())
+                    .map_or_else(|| uuid.to_owned(), |i| i.name.clone());
+                let head = identity
+                    .and_then(|i| i.head.as_ref())
+                    .filter(|s| safe_head(s))
+                    .cloned();
+                Ok(Some(Player {
+                    uuid: uuid.to_owned(),
+                    name,
+                    world: world.clone(),
+                    dimension: data.dimension,
+                    x: data.pos[0],
+                    y: data.pos[1],
+                    z: data.pos[2],
+                    head,
+                }))
+            })();
+            match result {
+                Ok(Some(player)) => markers.push(player),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(player = uuid, "skipping player: {error:#}"),
             }
-            let stats: BTreeMap<String, serde_json::Value> =
-                read_json(&root.join("stats").join(format!("{uuid}.json")))?;
-            if stats
-                .get("stat.playOneMinute")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-                <= MIN_PLAY_TICKS
-            {
-                return Ok(None);
-            }
-            let identity = identities.get(uuid);
-            let name = identity
-                .filter(|i| !i.name.is_empty())
-                .map_or_else(|| uuid.to_owned(), |i| i.name.clone());
-            let head = identity
-                .and_then(|i| i.head.as_ref())
-                .filter(|s| safe_head(s))
-                .cloned();
-            Ok(Some(Player {
-                uuid: uuid.to_owned(),
-                name,
-                world: world.clone(),
-                dimension: data.dimension,
-                x: data.pos[0],
-                y: data.pos[1],
-                z: data.pos[2],
-                head,
-            }))
-        })();
-        match result {
-            Ok(Some(player)) => markers.push(player),
-            Ok(None) => {}
-            Err(error) => tracing::warn!(player = uuid, "skipping player: {error:#}"),
         }
     }
-    markers.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+    markers.sort_by(|a, b| (&a.world, &a.uuid).cmp(&(&b.world, &b.uuid)));
+    let updated_at = crate::output::unix_time();
+    atomic_write(
+        &config.output.join("live/players.json"),
+        &serde_json::to_vec(&Players {
+            updated_at,
+            players: markers,
+        })?,
+    )?;
+    if players_only {
+        crate::output::install_viewer(&config.output)?;
+        return Ok(());
+    }
     let state_path = state_dir.join("live-index.json");
     // Unlike individual input documents, the checkpoint grows with world size.
     let old: State = match fs::read(&state_path)
@@ -262,14 +296,6 @@ pub fn update(config: &Config, players: &Path, identities: Option<&Path>) -> Res
             });
         }
     }
-    let updated_at = crate::output::unix_time();
-    atomic_write(
-        &config.output.join("live/players.json"),
-        &serde_json::to_vec(&Players {
-            updated_at,
-            players: markers,
-        })?,
-    )?;
     atomic_write(
         &config.output.join("live/chunks.json"),
         &serde_json::to_vec(&Activity { updated_at, chunks })?,
